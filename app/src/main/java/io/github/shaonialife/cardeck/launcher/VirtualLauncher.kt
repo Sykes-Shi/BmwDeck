@@ -3,6 +3,7 @@ package io.github.shaonialife.cardeck.launcher
 import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.RectF
 import android.graphics.drawable.Drawable
 import android.hardware.display.DisplayManager
@@ -29,6 +30,10 @@ import io.github.shaonialife.cardeck.shizuku.Shell
 import io.github.shaonialife.cardeck.shizuku.ShizukuGate
 import io.github.shaonialife.cardeck.ui.ScreenDimmer
 import io.github.shaonialife.cardeck.util.Bg
+import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -55,6 +60,7 @@ object VirtualLauncher {
     ) {
         val phoneNavigation = PhoneNavigationSessionPolicy(phoneNavigation, generation, navigationRevision)
         @Volatile var baiduCruiseTile = false
+        var requestedMapPackage: String? = null
         val dashboardMapRequests = DashboardMapRequests()
     }
 
@@ -476,6 +482,93 @@ object VirtualLauncher {
     /** 回退形态的地图屏句柄（受信形态经 shell 创建，无本进程句柄）。 */
     private var mapDisplay: VirtualDisplay? = null
     private var composer: DualDisplayComposer? = null
+
+    // Map launches are serialized by mapLaunchLock. Keep static frames when the same task is shown again.
+    private fun prepareMapSampleOwner(pkg: String, newTask: Boolean = false) {
+        val session = launchSession
+        if (newTask || session.requestedMapPackage != pkg) composer?.invalidateMapSamples()
+        session.requestedMapPackage = pkg
+    }
+
+    internal fun invalidateRestartedMap(generation: Long, displayId: Int) {
+        if (isCurrentSession(generation) && displayId > 0 && displayId == mapDisplayId) {
+            composer?.invalidateMapSamples()
+        }
+    }
+
+    /** Captures belong to the display, map and projection session observed at the user's tap. */
+    internal class MapSampleSource(private val generation: Long, private val navigation: Long) {
+        private val session = launchSession
+        private val ctx = appContextRef ?: error("请先连接车机，并在中控打开地图")
+        private val targetComposer = composer ?: error("地图画面还未就绪")
+        private val display = mapDisplayId
+        private val revision = presentationRequests.get()
+        private val mapPackage = defaultMapComponent(ctx)?.packageName
+
+        private fun checkSession() {
+            check(launchSession === session && session.generation == generation &&
+                appContextRef === ctx && composer === targetComposer && mapDisplayId == display &&
+                session.navigationRevision == navigation) { "连接或导航模式已变化，请重新导出" }
+            check(!session.phoneNavigation.enabled) { "当前使用手机导航。请关闭手机导航，并在中控打开地图" }
+            check(display > 0 && (mapFullscreen || dashboardMode) && presentationRequests.get() == revision) {
+                "请在中控打开默认地图，待画面显示后再导出"
+            }
+        }
+
+        private fun checkForeground() {
+            checkSession()
+            check(mapPackage != null && defaultMapComponent(ctx)?.packageName == mapPackage) {
+                "请先选择并打开中控的默认地图"
+            }
+            // Only display headers and resumed activity identities leave the shell.
+            val dump = Shell.exec(
+                "dumpsys -t 2 activity activities | grep -E '^[[:space:]]*(Display[ :]|topResumedActivity|mResumedActivity|Resumed:)'",
+                timeoutMs = 3000,
+            )
+            check(dump.ok && mapPackagePlacement(display, dump.output, mapPackage).activity != null) {
+                "地图屏前台未确认是所选地图。请返回中控默认地图后重试"
+            }
+            checkSession()
+        }
+
+        fun captureImage(requiredPackage: String? = null): Bitmap {
+            check(requiredPackage == null || requiredPackage == mapPackage) { "请将中控默认地图设为百度地图，并开始路线导航" }
+            checkForeground()
+            val bitmap = targetComposer.captureMapFrame()
+            try {
+                checkForeground()
+                return bitmap
+            } catch (failure: Throwable) {
+                bitmap.recycle()
+                throw failure
+            }
+        }
+
+        fun captureVideo(file: File) {
+            checkForeground()
+            val stop = CountDownLatch(1)
+            val failure = AtomicReference<Throwable?>(null)
+            // Read the per-display foreground on a separate worker so the encoder never waits for shell.
+            val monitor = Bg.pool.submit {
+                try {
+                    while (!stop.await(800, TimeUnit.MILLISECONDS)) checkForeground()
+                } catch (error: Throwable) {
+                    failure.set(error)
+                }
+            }
+            try {
+                targetComposer.captureMapClip(file) {
+                    failure.get()?.let { throw it }
+                    checkSession()
+                }
+            } finally {
+                stop.countDown()
+                monitor.get()
+            }
+            failure.get()?.let { throw it }
+            checkForeground()
+        }
+    }
 
     internal fun startRotaryBrightnessProbe(generation: Long): Boolean {
         if (!isCurrentSession(generation)) return false
@@ -1390,6 +1483,9 @@ object VirtualLauncher {
         // 同屏已有其他地图任务时清掉（白名单互斥；默认地图任务保留复用）
         val ctx = appContextRef
         val defaultPkg = ctx?.let { defaultMapComponent(it)?.packageName }
+        if (!current()) return false
+        // Non-default maps are explicitly removed below. A default map may reuse its own task.
+        prepareMapSampleOwner(component.packageName, newTask = component.packageName != defaultPkg)
         if (component.packageName != defaultPkg) {
             taskIdsOnDisplayPkg(component.packageName, targetDisplay).forEach { taskId ->
                 if (!current()) return false
@@ -1489,13 +1585,12 @@ object VirtualLauncher {
                 Shell.exec("dumpsys -t 2 activity activities", timeoutMs = 3000)
             } else null
             if (!current()) return
-            if (baiduDump?.ok == true) {
-                val visible = baiduOnMapDisplay(targetDisplay, baiduDump.output).activity
-                if (visible != null) {
-                    ProjectionAppMobileData.note(ctx, session.generation, component.packageName)
-                    logSink?.invoke("MAP: 首页复用前台地图 display=$targetDisplay task=${visible.taskId}")
-                    return
-                }
+            val placement = baiduDump?.takeIf { it.ok }?.let { baiduOnMapDisplay(targetDisplay, it.output) }
+            if (placement?.activity != null) {
+                prepareMapSampleOwner(component.packageName)
+                ProjectionAppMobileData.note(ctx, session.generation, component.packageName)
+                logSink?.invoke("MAP: 首页复用前台地图 display=$targetDisplay task=${placement.activity.taskId}")
+                return
             }
             if (baiduAutomatic && baiduDump != null) {
                 val evidence = baiduCruiseTaskEvidence(baiduDump.ok, baiduDump.output)
@@ -1520,6 +1615,7 @@ object VirtualLauncher {
                     component.flattenToShortString()
                 }
             // 不带 MULTIPLE_TASK：任务已在地图屏时等价于带回前台
+            prepareMapSampleOwner(component.packageName, newTask = placement != null && placement.taskId == null)
             val result = Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
             if (!current()) return
             val started = result.ok && result.output.contains("Starting:", true) && !result.output.contains("Error:", true)
@@ -1589,6 +1685,7 @@ object VirtualLauncher {
             else -> " -f 0x18000000"
         }
         if (!current()) return false
+        prepareMapSampleOwner(receiver.packageName, newTask = page != BaiduMapPage.CRUISE && mapTaskId == null)
         val result = Shell.exec(
             "am start -a android.intent.action.VIEW -d ${shellArgument(uri)} " +
                 "-n ${shellArgument(receiver.flattenToString())} --display $displayId$flags 2>&1",
@@ -1712,6 +1809,7 @@ object VirtualLauncher {
             val name = if (component.packageName == "com.autonavi.amapauto") "com.autonavi.amapauto/.MainMapActivity"
                 else component.flattenToShortString()
             if (!current()) return
+            prepareMapSampleOwner(component.packageName, newTask = !existing)
             val result = Shell.exec("am start -n ${shellArgument(name)} --display $display" +
                 if (existing) "" else " -f 0x18000000", 8_000)
             if (!current()) return

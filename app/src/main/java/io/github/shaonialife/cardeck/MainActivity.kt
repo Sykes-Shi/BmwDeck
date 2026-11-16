@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -32,7 +33,11 @@ import io.github.shaonialife.cardeck.audio.AudioSender
 import io.github.shaonialife.cardeck.bt.BtProfiles
 import io.github.shaonialife.cardeck.bt.TargetDevicePrefs
 import io.github.shaonialife.cardeck.input.TouchRouter
+import io.github.shaonialife.cardeck.launcher.BaiduCruise
 import io.github.shaonialife.cardeck.launcher.VirtualLauncher
+import io.github.shaonialife.cardeck.navigation.BaiduCardReader
+import io.github.shaonialife.cardeck.navigation.BaiduVisibleCue
+import io.github.shaonialife.cardeck.navigation.GuidanceSnapshotExport
 import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.legal.DisclaimerDialog
 import io.github.shaonialife.cardeck.legal.DisclaimerPrefs
@@ -50,7 +55,9 @@ import io.github.shaonialife.cardeck.ui.ScreenDimmer
 import io.github.shaonialife.cardeck.ui.SignalWavesView
 import io.github.shaonialife.cardeck.ui.WallpaperStore
 import io.github.shaonialife.cardeck.util.Bg
+import io.github.shaonialife.cardeck.util.ClusterSampleFile
 import io.github.shaonialife.cardeck.util.LogExporter
+import java.io.File
 import java.util.Locale
 
 /**
@@ -65,6 +72,7 @@ class MainActivity : AppCompatActivity() {
 
     /** 连接中的默认副标题（无阶段提示时）。 */
     private companion object {
+        val mapSampleExportInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
         const val DEFAULT_CONNECTING_HINT = "蓝牙 iAP2 握手 → 加入车机热点 → 建立 CarPlay 会话"
         const val KEY_DISCLAIMER_DEADLINE = "disclaimer_deadline"
     }
@@ -498,7 +506,7 @@ class MainActivity : AppCompatActivity() {
                     DarkMessageDialog.show(
                         activity = this,
                         title = "触控服务尚未接通",
-                        message = "请打开 Shizuku，确认服务正在运行且已授权 CarDeck BMW诊断版，再回到这里重试。若仍未接通，请重新启动 Shizuku 后重试。",
+                        message = "请打开 Shizuku，确认服务正在运行且已授权 CarDeck BMW仪表测试版，再回到这里重试。若仍未接通，请重新启动 Shizuku 后重试。",
                         actions = listOf(
                             DarkMessageDialog.Action("取消") {},
                             DarkMessageDialog.Action("重试", DarkMessageDialog.Emphasis.PRIMARY) {
@@ -989,6 +997,11 @@ class MainActivity : AppCompatActivity() {
             snack("已复制 ${text.length} 字符日志")
         }
         findViewById<ImageView>(R.id.btnExportLog).setOnClickListener { exportLogFile() }
+        findViewById<View>(R.id.btnExportMapSample).setOnClickListener { exportMapSample(MapExport.IMAGE) }
+        findViewById<View>(R.id.btnExportMapClip).setOnClickListener { exportMapSample(MapExport.CLIP) }
+        findViewById<View>(R.id.btnExportGuidanceSnapshot).setOnClickListener {
+            GuidanceSnapshotExport.prompt(this) { exportMapSample(MapExport.GUIDANCE_CARD) }
+        }
         // 长按导全部历史：默认只导本次启动，历史日志量大时按需手动取
         findViewById<ImageView>(R.id.btnExportLog).setOnLongClickListener {
             exportLogFile(LogExporter.Scope.ALL)
@@ -1889,7 +1902,7 @@ class MainActivity : AppCompatActivity() {
     private fun sh(cmd: String): String = shExec(cmd).output
 
     /**
-     * 导出日志到「下载/CarDeck/」并弹窗告知位置。
+     * 导出日志到「下载/CarDeck-BMW-Cluster/」并弹窗告知位置。
      *
      * 默认只导**本次进程启动之后**的日志（历史轮次对排查是噪音，动辄几百 KB）；
      * 长按导出按钮导全部历史（[LogExporter.Scope.ALL]）。
@@ -1898,6 +1911,199 @@ class MainActivity : AppCompatActivity() {
      * 存储满/媒体库异常失败）。
      */
     private val logExportInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private enum class MapExport(val savedTitle: String, val progress: String) {
+        IMAGE("地图样张已保存", "正在读取中控的地图画面…"),
+        CLIP("地图视频已保存", "正在录制 5 秒地图视频…"),
+        GUIDANCE_CARD("百度转向提示图片已保存", "正在读取百度地图的转向提示…"),
+    }
+
+    private class NoVisibleGuidance(val arrival: Boolean) : IllegalStateException()
+
+    @Volatile private var parkedGuidanceForeground: Any? = null
+
+    private data class ParkedGuidance(
+        val reading: BaiduCardReader.Reading,
+        val source: VirtualLauncher.MapSampleSource,
+        val client: io.github.shaonialife.cardeck.airplay.AirPlayClient,
+        val sender: io.github.shaonialife.cardeck.video.VideoSender,
+        val generation: Long,
+        val navigation: Long,
+        val sampledAtMs: Long,
+        val foreground: Any,
+    )
+
+    private fun isCurrentParkedGuidance(sample: ParkedGuidance): Boolean =
+        parkedGuidanceForeground === sample.foreground && !isFinishing && !isDestroyed &&
+            SystemClock.elapsedRealtime() - sample.sampledAtMs in 0L..90_000L &&
+            SessionController.videoSender === sample.sender && sample.sender.isRunning &&
+            SessionController.currentClient === sample.client && VirtualLauncher.isCurrentSession(sample.generation) &&
+            VirtualLauncher.navigationRevision() == sample.navigation
+
+    private fun confirmParkedGuidance(sample: ParkedGuidance) {
+        if (!isCurrentParkedGuidance(sample)) {
+            snack("连接或提示已过期。请重新从地图取提示。", 5_000L)
+            return
+        }
+        val hint = "${sample.reading.distanceMeters} 米后${sample.reading.maneuver}"
+        DarkMessageDialog.show(
+            this, "停车核对仪表",
+            "百度地图当前提示为“$hint”。请停稳并结束宝马原车导航。确认后会再次读取地图，向车机声明手机导航开始，提交这条转向提示，约 6 秒后结束。",
+            listOf(
+                DarkMessageDialog.Action("取消") {},
+                DarkMessageDialog.Action("已停稳，开始核对", DarkMessageDialog.Emphasis.PRIMARY) {
+                    submitParkedGuidance(sample)
+                },
+            ),
+        )
+    }
+
+    private fun submitParkedGuidance(sample: ParkedGuidance) {
+        if (!mapSampleExportInProgress.compareAndSet(false, true)) {
+            snack("已有地图导出或核对任务，请稍候")
+            return
+        }
+        Bg.run("parked-guidance") {
+            val expired = "连接或提示已过期。请重新从地图取提示。"
+            val changed = "百度地图画面已变化或无法复核。请重新从地图取提示。"
+            val sendFailed = "本次核对提交失败，请导出本次日志。"
+            val result = runCatching {
+                check(isCurrentParkedGuidance(sample)) { expired }
+                val bitmap = runCatching { sample.source.captureImage(BaiduCruise.PACKAGE) }.getOrElse {
+                    error(if (isCurrentParkedGuidance(sample)) changed else expired)
+                }
+                val current = try {
+                    BaiduVisibleCue.extract(bitmap)?.let { card ->
+                        try { BaiduCardReader.read(card) } finally { if (card !== bitmap) card.recycle() }
+                    }
+                } finally {
+                    bitmap.recycle()
+                }
+                check(current == sample.reading) { changed }
+                check(isCurrentParkedGuidance(sample)) { expired }
+                sample.client.tryParkedBmwGuidance(sample.reading.maneuver == "左转", sample.reading.distanceMeters) {
+                    isCurrentParkedGuidance(sample)
+                }.message
+            }
+            mapSampleExportInProgress.set(false)
+            runOnUiThread {
+                if (isFinishing || isDestroyed || parkedGuidanceForeground !== sample.foreground) return@runOnUiThread
+                val message = result.getOrElse {
+                    if (!isCurrentParkedGuidance(sample)) expired else it.message?.takeIf { m ->
+                        m == changed || m == expired
+                    } ?: sendFailed
+                }
+                DarkMessageDialog.show(this, "停车核对仪表", message, listOf(DarkMessageDialog.Action("关闭") {}))
+            }
+        }
+    }
+
+    private fun exportMapSample(kind: MapExport) {
+        val sender = SessionController.videoSender
+        val client = SessionController.currentClient
+        val foreground = parkedGuidanceForeground
+        val generation = VirtualLauncher.sessionGeneration()
+        val navigation = VirtualLauncher.navigationRevision()
+        if (sender == null || !sender.isRunning) {
+            snack("请先连接车机，并在中控打开默认地图", 4_000L)
+            return
+        }
+        if (!mapSampleExportInProgress.compareAndSet(false, true)) {
+            snack("已有地图导出任务，请稍候")
+            return
+        }
+        snack(kind.progress)
+        val ctx = applicationContext
+        Bg.run("export-map-sample") {
+            var parked: ParkedGuidance? = null
+            fun checkSession() {
+                check(SessionController.videoSender === sender && sender.isRunning &&
+                    VirtualLauncher.isCurrentSession(generation) && VirtualLauncher.navigationRevision() == navigation) {
+                    "连接或导航模式已变化，请重新导出"
+                }
+            }
+            val result = runCatching {
+                checkSession()
+                val source = VirtualLauncher.MapSampleSource(generation, navigation)
+                if (kind == MapExport.CLIP) {
+                    val clip = File.createTempFile("cluster-map-", ".mp4", ctx.cacheDir)
+                    try {
+                        source.captureVideo(clip)
+                        checkSession()
+                        ClusterSampleFile.save(ctx, "CarDeck-map", "mp4", "video/mp4") { out ->
+                            clip.inputStream().use { it.copyTo(out) }
+                            checkSession()
+                        }
+                    } finally {
+                        clip.delete()
+                    }
+                } else {
+                    val cue = kind == MapExport.GUIDANCE_CARD
+                    val sampledAtMs = SystemClock.elapsedRealtime()
+                    val bitmap = source.captureImage(if (cue) BaiduCruise.PACKAGE else null)
+                    val capturedAt = java.time.Instant.now()
+                    var card: Bitmap? = null
+                    try {
+                        checkSession()
+                        if (cue) {
+                            card = BaiduVisibleCue.extract(bitmap)
+                                ?: throw NoVisibleGuidance(BaiduVisibleCue.isArrivalSummary(bitmap))
+                        }
+                        val image = card ?: bitmap
+                        val prefix = if (cue) "CarDeck-guidance-card" else "CarDeck-map"
+                        val imagePath = ClusterSampleFile.save(ctx, prefix, "png", "image/png") { out ->
+                            check(image.compress(Bitmap.CompressFormat.PNG, 100, out)) { "地图图片保存失败" }
+                            checkSession()
+                        }
+                        if (card == null) imagePath else {
+                            val reading = BaiduCardReader.read(image)
+                            if (reading != null && (reading.maneuver == "左转" || reading.maneuver == "右转") &&
+                                client != null && foreground != null) {
+                                parked = ParkedGuidance(reading, source, client, sender, generation, navigation, sampledAtMs, foreground)
+                            }
+                            GuidanceSnapshotExport.saveVisiblePreview(ctx, reading, imagePath, capturedAt)
+                        }
+                    } finally {
+                        card?.recycle()
+                        bitmap.recycle()
+                    }
+                }
+            }
+            mapSampleExportInProgress.set(false)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess { path ->
+                    DarkMessageDialog.show(
+                        this, title = kind.savedTitle, message = path,
+                        actions = buildList {
+                            parked?.let { sample ->
+                                add(DarkMessageDialog.Action("停车核对仪表", DarkMessageDialog.Emphasis.PRIMARY) { confirmParkedGuidance(sample) })
+                            }
+                            add(DarkMessageDialog.Action("关闭") {})
+                        },
+                    )
+                }.onFailure { error ->
+                    if (error is NoVisibleGuidance) {
+                        val message = if (error.arrival) {
+                            "地图已显示到达总结。下次可在停车时开始一条路线，看到下一路口的箭头和距离后再提取。"
+                        } else {
+                            "当前画面未识别到转向卡。可以导出整幅地图，保留下次适配需要的画面。"
+                        }
+                        SessionController.appendLog("GUIDANCE: 地图取样 state=" + if (error.arrival) "arrival_summary" else "unrecognized_layout")
+                        DarkMessageDialog.show(
+                            this, title = if (error.arrival) "已到达目的地" else "当前没有可提取的转向提示", message = message,
+                            actions = listOf(
+                                DarkMessageDialog.Action("导出整幅地图") { exportMapSample(MapExport.IMAGE) },
+                                DarkMessageDialog.Action("关闭") {},
+                            ),
+                        )
+                    } else {
+                        snack((error as? IllegalStateException)?.message ?: "地图导出失败，请检查可用空间后重试", 5_000L)
+                    }
+                }
+            }
+        }
+    }
 
     private fun exportLogFile(scope: LogExporter.Scope = LogExporter.Scope.CURRENT_SESSION) {
         if (!logExportInProgress.compareAndSet(false, true)) {
@@ -2021,7 +2227,7 @@ class MainActivity : AppCompatActivity() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             }
         if (runCatching { startActivity(view) }.isSuccess) return
-        // 无文本查看器时退到「文件管理器」：DocumentsUI 的内部存储根（用户按路径进 下载/CarDeck）
+        // 无文本查看器时退到「文件管理器」：用户按提示路径进入下载目录。
         val storageRoot =
             Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(
@@ -2395,6 +2601,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        parkedGuidanceForeground = Any()
         mainHandler.post(heroTick)
         // 旋转/重建后尚未接受：用原截止时刻续弹（不重新等 10 秒）
         if (needsDisclaimerAtLaunch(
@@ -2536,6 +2743,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        parkedGuidanceForeground = null
         super.onPause()
         mainHandler.removeCallbacks(heroTick)
     }

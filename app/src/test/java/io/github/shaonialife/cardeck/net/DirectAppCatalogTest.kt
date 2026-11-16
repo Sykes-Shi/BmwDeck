@@ -81,8 +81,8 @@ class DirectAppCatalogTest {
     }
 
     @Test fun excludesServiceCoreAndCrossProfileIdentities() {
-        val self = "io.github.shaonialife.cardeck.bmwprobe"
-        for (pkg in listOf(self, "io.github.shaonialife.cardeck", clash, "com.android.settings", "com.google.android.gms")) {
+        val self = "io.github.shaonialife.cardeck.bmwcluster"
+        for (pkg in listOf(self, "io.github.shaonialife.cardeck", "io.github.shaonialife.cardeck.bmwprobe", clash, "com.android.settings", "com.google.android.gms")) {
             assertFalse(DirectAppCatalog.eligibleOwner(pkg, 10200, 10100, self))
         }
         assertFalse(DirectAppCatalog.eligibleOwner(map.pkg, 1000, 10100, self))

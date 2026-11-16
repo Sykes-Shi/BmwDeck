@@ -11,7 +11,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 日志导出：把运行日志写成 `下载/CarDeck/CarDeck-log-<时间>.txt`，普通文件管理器可见。
+ * 日志导出：把运行日志写成 `下载/CarDeck-BMW-Cluster/CarDeck-log-<时间>.txt`，普通文件管理器可见。
  *
  * 为什么落 MediaStore.Downloads 而不是应用私有目录：
  *  - `filesDir` / `getExternalFilesDir` 普通用户在文件管理器里找不到（Android 11+
@@ -41,8 +41,8 @@ object LogExporter {
         val scope: Scope,
     )
 
-    /** 导出目录（相对外部存储根）：下载/CarDeck。 */
-    private val RELATIVE_DIR = "${Environment.DIRECTORY_DOWNLOADS}/CarDeck"
+    /** 导出目录（相对外部存储根），与中控版分开。 */
+    private val RELATIVE_DIR = "${Environment.DIRECTORY_DOWNLOADS}/CarDeck-BMW-Cluster"
 
     /** 文件管理器里展示的绝对路径前缀（主用户外部存储；分区存储下即 /sdcard）。 */
     private const val DISPLAY_ROOT = "/storage/emulated/0"

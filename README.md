@@ -6,9 +6,9 @@ CarDeck-BMW is an experimental Android project based on [CarDeck](https://github
 
 ## 项目状态
 
-当前仓库源码对应 **V45 中控试用版**，在 V39 中控版本基础上继续优化，仍在开发和实车验证中。宝马车型、车机版本和手机系统存在差异，连接、声音、网络、导航和按键功能的表现可能不同。请在停车时完成配置和操作，并保留原车导航等备用方式。完整说明见 [免责声明](DISCLAIMER.md)。
+当前分支源码对应 **V45 仪表导航测试版**，在 V44 仪表实验基础上分离应用身份。仪表导航信息发送仍在实验和实车验证中，请仅在停车时配置和测试，并保留原车导航等备用方式。完整说明见 [免责声明](DISCLAIMER.md)。
 
-仪表导航测试版作为独立版本开发，使用不同的应用 ID；其源码见 [cluster-test 分支](https://github.com/Sykes-Shi/CarDeck-BMW/tree/cluster-test)，相关功能仍在实验与验证中。两版应分别安装授权，使用时一次只运行并连接其中一版。
+中控试用版源码见 [main 分支](https://github.com/Sykes-Shi/CarDeck-BMW/tree/main)。两版使用不同的应用 ID，应分别安装授权，使用时一次只运行并连接其中一版。
 
 各诊断版本的主要变化见 [版本更新记录](CHANGELOG.md)。如需体验或获取安装包，可通过 [GitHub Issues](https://github.com/Sykes-Shi/CarDeck-BMW/issues) 联系项目维护者，并说明希望获取的版本。
 
@@ -40,14 +40,16 @@ CarDeck-BMW is an experimental Android project based on [CarDeck](https://github
 gradlew.bat :app:assembleDebug
 ```
 
-构建完成后，debug APK 位于 `app/build/outputs/apk/debug/`。此构建的应用 ID 为 `io.github.shaonialife.cardeck.bmwprobe`，与上游正式版的应用 ID 分开。
+构建完成后，debug APK 位于 `app/build/outputs/apk/debug/`。此测试版的应用 ID 为 `io.github.shaonialife.cardeck.bmwcluster`，与中控试用版分开。
 
-项目保留上游的 release 构建配置：未配置签名文件时会使用 debug 签名，且 release 应用 ID 为 `io.github.shaonialife.cardeck`。如需正式发布，请先配置自己的签名、检查应用 ID 和升级关系；不要提交密钥或签名密码。可参考 [keystore.properties.example](keystore.properties.example)。
+未配置签名文件时 release 构建会使用 debug 签名，应用 ID 同为 `io.github.shaonialife.cardeck.bmwcluster`。如需正式发布，请先配置自己的签名并检查升级关系；不要提交密钥或签名密码。可参考 [keystore.properties.example](keystore.properties.example)。
 
 ## 致谢与许可
 
 本项目基于 [shaonialife/cardeck](https://github.com/shaonialife/cardeck) 开发，源码基线为上游提交 [`09eebb0`](https://github.com/shaonialife/cardeck/commit/09eebb0f2a51c961c101e8fb49134ca7769b2d94)，感谢原作者及贡献者。上游版权声明为 **Copyright (c) 2026 lizhihua**，项目依照 [MIT License](LICENSE) 开源。
 
 日间默认壁纸由图像生成工具制作。
+
+导航识别测试样本包含百度地图界面的局部截取，相关界面图形权利归其权利人所有。
 
 本项目是独立的非官方实验项目，与宝马、Apple 及相关品牌无关联或认证。CarPlay、AirPlay 等名称及商标归各自权利人所有。

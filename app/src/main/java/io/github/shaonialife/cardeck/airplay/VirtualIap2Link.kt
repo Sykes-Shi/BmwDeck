@@ -6,6 +6,7 @@ import io.github.shaonialife.cardeck.iap2.Iap2LinkEngine
 import io.github.shaonialife.cardeck.iap2.Iap2MessageIds
 import io.github.shaonialife.cardeck.iap2.MfiLengthMemory
 import io.github.shaonialife.cardeck.input.ConsumerKeys
+import io.github.shaonialife.cardeck.navigation.ParkedGuidanceSession
 import java.security.SecureRandom
 import java.util.TimeZone
 import java.util.UUID
@@ -51,6 +52,7 @@ class VirtualIap2Link(
     private val lock = Any()
     private val engine =
         Iap2LinkEngine(suppressNormalAcknowledgementsForZeroAck = splitControlIapFrames)
+    private val parkedGuidance = ParkedGuidanceSession(::submitGuidanceFrameLocked, log, ::flushOutputLocked)
     private val parser = Iap2Csm.Parser()
     private var frameCount = 0
     private var eaCount = 0
@@ -155,18 +157,21 @@ class VirtualIap2Link(
         }
         Thread(
             {
-                while (alive()) {
-                    try {
+                try {
+                    while (alive()) {
                         Thread.sleep(200)
-                    } catch (_: InterruptedException) {
-                        return@Thread
+                        synchronized(lock) {
+                            if (!alive()) return@Thread
+                            maybeRetryBmwDetectLocked()
+                            engine.advanceTime(System.nanoTime() / 1_000_000L)
+                            if (engine.state == Iap2LinkEngine.State.NORMAL) parkedGuidance.tick(nowMillis()) else parkedGuidance.reset()
+                            drainLocked()
+                        }
                     }
-                    synchronized(lock) {
-                        if (!alive()) return@Thread
-                        maybeRetryBmwDetectLocked()
-                        engine.advanceTime(System.nanoTime() / 1_000_000L)
-                        drainLocked()
-                    }
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                } finally {
+                    synchronized(lock) { parkedGuidance.reset() }
                 }
             },
             "iap-link-pacer",
@@ -174,6 +179,30 @@ class VirtualIap2Link(
             isDaemon = true
             start()
         }
+    }
+
+    private fun guidanceLinkReadyLocked(): Boolean =
+        splitControlIapFrames && alive() && engine.state == Iap2LinkEngine.State.NORMAL && engine.peerSynchronization != null
+
+    internal fun canShowParkedGuidance(): Boolean = synchronized(lock) {
+        guidanceLinkReadyLocked() && parkedGuidance.canShow()
+    }
+
+    internal fun tryParkedBmwGuidance(turnLeft: Boolean, meters: Int, onEnded: () -> Unit = {}): Boolean = synchronized(lock) {
+        guidanceLinkReadyLocked() && parkedGuidance.show(turnLeft, meters, nowMillis(), onEnded)
+    }
+
+    internal fun cancelParkedGuidance() = synchronized(lock) {
+        if (guidanceLinkReadyLocked()) parkedGuidance.cancel() else parkedGuidance.reset()
+    }
+
+    private fun submitGuidanceFrameLocked(frame: ByteArray): Boolean {
+        val limit = engine.peerSynchronization?.maxLength ?: return false
+        if (!alive() || engine.state != Iap2LinkEngine.State.NORMAL || frame.size + 10 > limit) return false
+        val queued = engine.sendControl(frame, nowMillis())
+        val id = ((frame[4].toInt() and 255) shl 8) or (frame[5].toInt() and 255)
+        log("CLUSTER: 导航消息 0x${id.toString(16)} ${frame.size}B 已提交=$queued")
+        return queued
     }
 
     /** 事件形态启动：服务端待命（收到 marker 回 marker，等车机 SYN）。 */
@@ -233,6 +262,7 @@ class VirtualIap2Link(
      */
     private fun startControlRoundLocked(reason: String) {
         val now = nowMillis()
+        parkedGuidance.reset()
         controlSynRounds++
         controlSynRoundStartedAtMs = now
         engine.initiate(now)
@@ -403,6 +433,7 @@ class VirtualIap2Link(
                     handleFrameLocked(event.bytes)
 
                 is Iap2LinkEngine.Event.Dead -> {
+                    parkedGuidance.reset()
                     log("IAPLINK: 虚拟链路终止 - ${event.reason ?: "EOF"}")
                     return
                 }
@@ -664,6 +695,13 @@ class VirtualIap2Link(
                 )
                 log("IAPLINK: MIB3 0x4170 → 0x4171（空列表）")
             }
+
+            Iap2MessageIds.START_ROUTE_GUIDANCE_UPDATES -> {
+                if (splitControlIapFrames) parkedGuidance.subscribe(frame.body)
+                else log("CLUSTER: 收到车机导航引导订阅")
+            }
+
+            Iap2MessageIds.STOP_ROUTE_GUIDANCE_UPDATES -> if (splitControlIapFrames) parkedGuidance.unsubscribe(frame.body)
 
             Iap2MessageIds.START_NOW_PLAYING_UPDATES -> {
                 if (!mib3) return

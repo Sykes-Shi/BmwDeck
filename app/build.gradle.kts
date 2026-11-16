@@ -37,7 +37,7 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.github.shaonialife.cardeck"
+        applicationId = "io.github.shaonialife.cardeck.bmwcluster"
         minSdk = 31
         targetSdk = 34
         versionCode = appVersionCode
@@ -64,9 +64,8 @@ android {
             signingConfig = signingConfigs.getByName(if (hasReleaseKeystore) "release" else "debug")
         }
         debug {
-            // Standalone experimental copy: keep the official installation and data intact.
-            applicationIdSuffix = ".bmwprobe"
-            versionNameSuffix = "-v45-center"
+            // Separate application identity permits coexistence with the center-screen build.
+            versionNameSuffix = "-bmwprobe45-cluster"
         }
     }
 

@@ -40,11 +40,11 @@ object OnlineLyrics {
 
     fun isEnabled(ctx: Context): Boolean =
         ctx.getSharedPreferences("online_lyrics", Context.MODE_PRIVATE)
-            .getBoolean("enabled", ctx.packageName == "io.github.shaonialife.cardeck.bmwprobe")
+            .getBoolean("enabled", ctx.packageName == "io.github.shaonialife.cardeck.bmwcluster")
 
     fun isDirectRetryEnabled(ctx: Context): Boolean =
         ctx.getSharedPreferences("online_lyrics", Context.MODE_PRIVATE)
-            .getBoolean("direct_catalogue_retry", ctx.packageName == "io.github.shaonialife.cardeck.bmwprobe")
+            .getBoolean("direct_catalogue_retry", ctx.packageName == "io.github.shaonialife.cardeck.bmwcluster")
 
     fun setDirectRetryEnabled(ctx: Context, enabled: Boolean) {
         val stale = synchronized(this) {

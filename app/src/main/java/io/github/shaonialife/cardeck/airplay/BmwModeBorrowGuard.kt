@@ -21,6 +21,9 @@ internal class BmwModeBorrowGuard(receiverIdentity: String) {
     private val audio = BorrowState()
     private var nativePhoneCall = false
     private var nativeSpeech = -1L
+    private enum class Navigation { UNKNOWN, IDLE, NATIVE, PARKED }
+    private var navigation = Navigation.UNKNOWN
+    private var acceptsNavigationSeed = true
     // Even epochs permit media. Odd epochs last until the car acknowledges the return of
     // the audio resource and the end of the native call. The sender reads this lock-free.
     @Volatile private var callEpoch = 0L
@@ -37,6 +40,7 @@ internal class BmwModeBorrowGuard(receiverIdentity: String) {
         if (!eligibleReceiver) return ignored("receiver_not_supported")
         if (command["type"] != "changeModes") return ignored("unsupported_command")
         val params = command["params"] as? Map<*, *> ?: return ignored("malformed_params")
+        observeNavigation(params)
         val states = params["appStates"] as? List<*>
         if (states != null && states.size <= MAX_RESOURCE_ROWS) {
             for (entry in states) {
@@ -165,9 +169,80 @@ internal class BmwModeBorrowGuard(receiverIdentity: String) {
 
     fun isAudioBorrowed(): Boolean = audio.borrowed
 
+    /** Called under the client's mode lock with the receiver's /info modes dictionary. */
+    fun seedNavigationFromModes(modes: Map<*, *>?) {
+        if (eligibleReceiver && acceptsNavigationSeed && modes != null) observeNavigation(modes)
+    }
+
+    /** A fresh manual request may declare the controller only after explicit receiver idle. */
+    fun beginParkedNavigation(): Boolean {
+        if (!eligibleReceiver || navigation != Navigation.IDLE) return false
+        navigation = Navigation.PARKED
+        return true
+    }
+
+    fun endParkedNavigation(): Boolean {
+        if (navigation != Navigation.PARKED) return false
+        navigation = Navigation.IDLE
+        return true
+    }
+
+    fun parkedNavigationActive(): Boolean = navigation == Navigation.PARKED
+
+    /** Discard permission after a failed declaration on this connection. */
+    fun resetNavigationSession() {
+        // Do not replay cached /info after rejection. Require a new receiver update.
+        if (navigation != Navigation.NATIVE) navigation = Navigation.UNKNOWN
+        acceptsNavigationSeed = false
+    }
+
+    /** A reconnect on the same client must seed ownership from the new connection. */
+    fun forgetNavigationOnDisconnect() {
+        navigation = Navigation.UNKNOWN
+        acceptsNavigationSeed = true
+    }
+
+    private fun observeNavigation(params: Map<*, *>) {
+        if (!params.containsKey("appStates")) return
+        val states = params["appStates"] as? List<*>
+        if (states == null || states.size > MAX_RESOURCE_ROWS) {
+            resetNavigationSession()
+            return
+        }
+        var sawNative = false
+        var sawIdle = false
+        var malformed = false
+        for (entry in states) {
+            val row = entry as? Map<*, *>
+            val id = integer(row?.get("appStateID"))
+            if (id == null) malformed = true
+            if (id != 3L) continue
+            when (row?.get("state") as? Boolean) {
+                true -> sawNative = true
+                false -> sawIdle = true
+                null -> malformed = true
+            }
+        }
+        if (!sawNative && !malformed && !sawIdle) return
+        acceptsNavigationSeed = false
+        // A positive native request wins even if its sibling row is contradictory.
+        // Repeated native idle is not a request to cancel our bounded declaration.
+        when {
+            sawNative -> navigation = Navigation.NATIVE
+            malformed -> resetNavigationSession()
+            navigation != Navigation.PARKED -> navigation = Navigation.IDLE
+        }
+    }
+
+    private fun navigationEntity(): Long = when (navigation) {
+        Navigation.NATIVE -> ACCESSORY
+        Navigation.PARKED -> CONTROLLER
+        else -> 0L
+    }
+
     fun appStates(): List<Map<String, Any?>> = listOf(
         linkedMapOf("appStateID" to 2L, "entity" to if (nativePhoneCall) ACCESSORY else 0L),
-        linkedMapOf("appStateID" to 3L, "entity" to 0L),
+        linkedMapOf("appStateID" to 3L, "entity" to navigationEntity()),
         linkedMapOf("appStateID" to 1L, "entity" to if (nativeSpeech > 0) ACCESSORY else 0L, "speechMode" to nativeSpeech),
     )
 

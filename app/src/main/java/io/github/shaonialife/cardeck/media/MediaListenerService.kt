@@ -21,12 +21,16 @@ import io.github.shaonialife.cardeck.launcher.VirtualLauncher
 class MediaListenerService : NotificationListenerService() {
     private var connected = false
     companion object {
+        @Volatile internal var guidanceReader: MediaListenerService? = null
+            private set
+
         fun componentName(context: android.content.Context): ComponentName = ComponentName(context, MediaListenerService::class.java)
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         connected = true
+        guidanceReader = this
         // 已连上即代表系统认可本应用的通知使用权（此时 metadata 才会可读）。
         // 两个状态都置位：NotificationAccess 供「是否要再试授权」判断，
         // MediaSessionsState 供 UI 文案区分「没在播放」与「读不到信息」。
@@ -52,6 +56,7 @@ class MediaListenerService : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
+        if (guidanceReader === this) guidanceReader = null
         connected = false
         MediaSessionsState.accessGranted = false
         NotificationAccess.markDisconnected()
@@ -65,6 +70,7 @@ class MediaListenerService : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        if (guidanceReader === this) guidanceReader = null
         connected = false
         mainHandler.removeCallbacks(periodicRefresh)
         runCatching { manager.removeOnActiveSessionsChangedListener(sessionListener) }

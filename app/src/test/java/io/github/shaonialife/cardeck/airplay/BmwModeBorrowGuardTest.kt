@@ -6,6 +6,121 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BmwModeBorrowGuardTest {
+    private fun navigationModes(vararg states: Any?): Map<String, Any?> =
+        mapOf("appStates" to states.map { mapOf("appStateID" to 3L, "state" to it) })
+
+    private fun navigationChange(vararg states: Any?): Map<String, Any?> =
+        mapOf("type" to "changeModes", "params" to navigationModes(*states))
+
+    private fun navigationEntity(g: BmwModeBorrowGuard) =
+        g.appStates().single { it["appStateID"] == 3L }["entity"]
+
+    @Test fun parkedNavigationUsesObservedBmwIdleAndChangesOnlyTurnByTurn() {
+        val g = guard()
+        assertFalse(g.beginParkedNavigation())
+        // BMW /info modes as recorded at 18:29. The resources list is unrelated to this seed.
+        g.seedNavigationFromModes(mapOf("appStates" to listOf(
+            mapOf("appStateID" to 2L, "state" to false),
+            mapOf("speechMode" to -1L, "appStateID" to 1L),
+            mapOf("appStateID" to 3L, "state" to false),
+        ), "resources" to listOf(observedTake())))
+        val initialStates = g.appStates()
+        val resources = g.resources()
+        val revision = g.captureUiRestoreRevision()
+        val media = g.mediaEpoch()
+        assertTrue(g.beginParkedNavigation())
+        assertFalse(g.beginParkedNavigation())
+        assertEquals(1L, navigationEntity(g))
+        g.apply(navigationChange(false))
+        g.apply(phoneState(false))
+        assertTrue(g.parkedNavigationActive())
+        assertEquals(initialStates.filterNot { it["appStateID"] == 3L }, g.appStates().filterNot { it["appStateID"] == 3L })
+        assertEquals(resources, g.resources())
+        assertEquals(revision, g.captureUiRestoreRevision())
+        assertEquals(media, g.mediaEpoch())
+        assertTrue(g.endParkedNavigation())
+        assertFalse(g.endParkedNavigation())
+        assertEquals(initialStates, g.appStates())
+    }
+
+    @Test fun nativeNavigationPreemptsImmediatelyAndNeverRevivesAnOldPhoneRequest() {
+        val g = guard()
+        g.apply(navigationChange(false))
+        assertTrue(g.beginParkedNavigation())
+        g.apply(navigationChange(true))
+        g.apply(navigationChange(true))
+        g.seedNavigationFromModes(navigationModes(false)) // stale /info must lose to changeModes
+        assertEquals(2L, navigationEntity(g))
+        assertFalse(g.parkedNavigationActive())
+        assertFalse(g.endParkedNavigation())
+        assertFalse(g.beginParkedNavigation())
+        g.apply(navigationChange(null))
+        assertEquals(2L, navigationEntity(g))
+        g.apply(navigationChange(false))
+        assertEquals(0L, navigationEntity(g))
+        assertTrue(g.beginParkedNavigation())
+    }
+
+    @Test fun unknownOrMalformedNavigationCannotAuthorizePhoneAndNativeWinsConflicts() {
+        val unknown = listOf<Map<*, *>?>(null, emptyMap<String, Any>(), mapOf("appStates" to emptyList<Any>()),
+            navigationModes(null), navigationModes(0L), navigationModes("false"),
+            mapOf("appStates" to listOf(mapOf("appStateID" to 3L, "entity" to 0L))),
+            mapOf("appStates" to listOf(mapOf("appStateID" to 2L, "state" to false))))
+        for (modes in unknown) {
+            val g = guard()
+            g.seedNavigationFromModes(modes)
+            assertFalse(g.beginParkedNavigation())
+        }
+        for (conflict in listOf(navigationModes(true, false), navigationModes(false, true), navigationModes(true, null))) {
+            val g = guard()
+            g.seedNavigationFromModes(conflict)
+            assertEquals(2L, navigationEntity(g))
+            assertFalse(g.beginParkedNavigation())
+        }
+        val other = guard("another receiver")
+        other.seedNavigationFromModes(navigationModes(false))
+        other.apply(navigationChange(false))
+        assertFalse(other.beginParkedNavigation())
+        assertEquals(0L, navigationEntity(other))
+    }
+
+    @Test fun disconnectClearsNativeOrParkedStateAndAllowsTheNextConnectionsInfo() {
+        for (native in listOf(true, false)) {
+            val g = guard()
+            g.apply(command(row(id = "camera")))
+            val resources = g.resources()
+            g.seedNavigationFromModes(navigationModes(native))
+            if (!native) assertTrue(g.beginParkedNavigation())
+            g.forgetNavigationOnDisconnect()
+            assertEquals(resources, g.resources())
+            assertEquals(0L, navigationEntity(g))
+            assertFalse(g.parkedNavigationActive())
+            assertFalse(g.beginParkedNavigation())
+            g.seedNavigationFromModes(navigationModes(false))
+            assertTrue(g.beginParkedNavigation())
+        }
+    }
+
+    @Test fun resetOrMalformedUpdateRevokesCurrentClaimAndRequiresFreshReceiverInput() {
+        for (revoke in listOf<(BmwModeBorrowGuard) -> Unit>(
+            { it.resetNavigationSession() }, { it.apply(navigationChange(null)) },
+            { it.apply(navigationChange(false, "false")) }, { it.apply(navigationChange(*Array(33) { false })) },
+            { it.apply(mapOf("type" to "changeModes", "params" to mapOf("appStates" to "invalid"))) },
+        )) {
+            val g = guard()
+            g.seedNavigationFromModes(navigationModes(false))
+            assertTrue(g.beginParkedNavigation())
+            revoke(g)
+            assertFalse(g.parkedNavigationActive())
+            assertFalse(g.endParkedNavigation())
+            assertEquals(0L, navigationEntity(g))
+            g.seedNavigationFromModes(navigationModes(false))
+            assertFalse(g.beginParkedNavigation())
+            g.apply(navigationChange(false))
+            assertTrue(g.beginParkedNavigation())
+        }
+    }
+
     private fun phoneState(active: Boolean, vararg changes: Map<String, Any?>): Map<String, Any?> = mapOf(
         "type" to "changeModes", "params" to mapOf(
             "appStates" to listOf(mapOf("appStateID" to 2L, "state" to active),

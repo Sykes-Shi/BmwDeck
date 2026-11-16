@@ -12,6 +12,7 @@ import android.opengl.GLES20
 import android.util.Log
 import android.view.Surface
 import io.github.shaonialife.cardeck.launcher.VirtualLauncher
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -144,7 +145,7 @@ class DualDisplayComposer(
     internal fun sampleKidsVideo(hi: Boolean, revision: Long, playing: Boolean, motion: KidsVideoBackdrop.Motion): Boolean {
         val input = (if (hi) appHi else appInput) ?: return false
         val probe = Bitmap.createBitmap(KidsVideoBackdrop.WIDTH, KidsVideoBackdrop.HEIGHT, Bitmap.Config.ARGB_8888)
-        SurfaceFrameCopy.copyInto(input.surface, probe, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(700))
+        MapFrameCopy.copyInto(input.surface, probe, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(700))
         val bands = try {
             val colors = IntArray(probe.width * probe.height)
             probe.getPixels(colors, 0, probe.width, 0, 0, probe.width, probe.height)
@@ -209,6 +210,46 @@ class DualDisplayComposer(
     /** 地图屏输入（GL 线程创建）。 */
     @Volatile
     private var mapInput: Input? = null
+
+    private val capturingMap = AtomicBoolean(false)
+
+    /** Only buffers committed for the current map geometry and owner can be exported. */
+    fun invalidateMapSamples() {
+        mapInput?.let { input -> synchronized(input) { input.geometry = input.geometry.copy() } }
+    }
+
+    /** 只读取地图专属 Surface；停车静止时沿用已核验的最近一帧。 */
+    fun captureMapFrame(): Bitmap {
+        check(capturingMap.compareAndSet(false, true)) { "地图样图正在导出" }
+        try {
+            val input = checkNotNull(mapInput) { "地图显示屏尚未就绪" }
+            val geometry = input.geometry
+            return MapFrameCopy.capture(input.surface, geometry, { input.committedGeometry === geometry }) {
+                running.get() && mapInput === input && input.geometry === geometry
+            }
+        } finally {
+            capturingMap.set(false)
+        }
+    }
+
+    /** Five-second software encoding runs entirely on the export worker. */
+    internal fun captureMapClip(file: File, checkSource: () -> Unit) {
+        check(capturingMap.compareAndSet(false, true)) { "地图导出正在进行" }
+        try {
+            val input = checkNotNull(mapInput) { "地图显示屏尚未就绪" }
+            val geometry = input.geometry
+            MapClipEncoder.record(file, input.surface, geometry, {
+                if (input.committedGeometry === geometry) input.frameCount else 0
+            }) {
+                check(running.get() && mapInput === input && input.geometry === geometry && input.surface.isValid) {
+                    "地图会话或显示尺寸已改变，请重新录制"
+                }
+                checkSource()
+            }
+        } finally {
+            capturingMap.set(false)
+        }
+    }
 
     @Volatile
     var onSurfacesReady: ((dock: Surface, app: Surface, appHi: Surface?, map: Surface?) -> Unit)? = null
@@ -310,7 +351,12 @@ class DualDisplayComposer(
         width: Int,
         height: Int,
     ) {
-        mapInput?.surfaceTexture?.setDefaultBufferSize(width, height)
+        mapInput?.let { input ->
+            synchronized(input) {
+                input.surfaceTexture.setDefaultBufferSize(width, height)
+                input.geometry = MapFrameSize(width, height)
+            }
+        }
     }
 
     fun stop() {
@@ -319,13 +365,11 @@ class DualDisplayComposer(
         glThread = null
     }
 
-    private data class InputSize(val width: Int, val height: Int)
-
     private class Input(
         val texture: Int,
         val surfaceTexture: SurfaceTexture,
         val surface: Surface,
-        @Volatile var geometry: InputSize,
+        @Volatile var geometry: MapFrameSize,
     ) {
         @Volatile
         var hasNewFrame = false
@@ -337,6 +381,9 @@ class DualDisplayComposer(
         /** 累计产出帧数（活动屏切换的「已出帧」判据）。 */
         @Volatile
         var frameCount = 0
+
+        @Volatile
+        var committedGeometry: MapFrameSize? = null
     }
 
     private fun runGl(
@@ -411,7 +458,7 @@ class DualDisplayComposer(
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             val st = SurfaceTexture(tex[0])
             st.setDefaultBufferSize(width, height)
-            val input = Input(tex[0], st, Surface(st), InputSize(width, height))
+            val input = Input(tex[0], st, Surface(st), MapFrameSize(width, height))
             st.setOnFrameAvailableListener { input.hasNewFrame = true }
             return input
         }
@@ -626,10 +673,12 @@ class DualDisplayComposer(
             }
             map?.let {
                 if (it.hasNewFrame) {
+                    val geometry = it.geometry
                     it.hasNewFrame = false
                     it.hasContent = true
-                    it.frameCount++
                     it.surfaceTexture.updateTexImage()
+                    it.frameCount++
+                    it.committedGeometry = geometry
                 }
             }
             val activeInput = if (activeAppHi) hi else app
@@ -785,6 +834,7 @@ class DualDisplayComposer(
             }
         } catch (_: InterruptedException) {
         } finally {
+            if (mapInput === map) mapInput = null
             if (overlayTexture != 0) {
                 runCatching { GLES20.glDeleteTextures(1, intArrayOf(overlayTexture), 0) }
                 overlayTexture = 0

@@ -46,7 +46,7 @@ class BaiduDestinationTest {
         assertNull(baiduOnMapDisplay(42, dump.replace("com.other.app/.Top", "com.baidu.BaiduMap.fake/.Maps")).activity)
     }
 
-    @Test fun selectedPackageMustBeForegroundOnItsOwnDisplay() {
+    @Test fun mapExportChecksTheSelectedPackageOnItsOwnDisplay() {
         val dump = """
             Display #0 (activities from top to bottom):
               topResumedActivity=ActivityRecord{abc u0 com.baidu.BaiduMap/.Maps t7}

@@ -229,6 +229,7 @@ object LetterboxHintController {
             var current = activity
             var healedAndRelaunched = false
             if (!systemOn && changeIds) {
+                VirtualLauncher.invalidateRestartedMap(owner.launcherGeneration, displayId)
                 val healed =
                     AppOrientationCompat.setEnabledForSession(context, activity.packageName, true, owner.orientation) ==
                         AppOrientationCompat.WriteResult.OK
@@ -413,6 +414,7 @@ object LetterboxHintController {
                     return@runCatching
                 }
                 if (!canOperate(t.owner, context, t.packageName)) return@runCatching
+                VirtualLauncher.invalidateRestartedMap(t.owner.launcherGeneration, t.displayId)
                 Shell.exec("am force-stop ${t.packageName}", timeoutMs = 8_000)
                 Thread.sleep(400)
                 if (!canOperate(t.owner, context, t.packageName)) return@runCatching

@@ -525,6 +525,10 @@ class AirPlayClient(
             readerGeneration++
         }
         failAllPending("控制通道关闭")
+        synchronized(modeStateLock) {
+            parkedPreviewToken = null
+            bmwBorrowGuard?.forgetNavigationOnDisconnect()
+        }
         runCatching { iapTunnel?.socket?.close() }
         iapTunnel = null
         iapLink = null
@@ -662,6 +666,7 @@ class AirPlayClient(
     // 所有声明入口共用同一把锁，避免排队的 requestUI 把较新的车机借屏状态覆盖掉。
     private val modeStateLock = Any()
     @Volatile private var bmwBorrowGuard: BmwModeBorrowGuard? = null
+    private var parkedPreviewToken: Any? = null
 
     internal fun currentMediaEpoch(): Long? {
         if (cancelled) return null
@@ -750,7 +755,12 @@ class AirPlayClient(
         val guard = borrowGuardLocked()
         val before = guard.isScreenAvailableToController()
         val mediaBefore = guard.mediaEpoch()
+        val wasShowingNavigation = guard.parkedNavigationActive()
         val result = guard.apply(command)
+        if (wasShowingNavigation && !guard.parkedNavigationActive()) {
+            log("CLUSTER: 车机更新导航状态，提前结束停车核对")
+            iapLink?.cancelParkedGuidance()
+        }
         retryableScreenLoan = guard.captureUiRestoreRevision().takeIf(guard::canRetryScreenLoan)
         if (mediaBefore != null && guard.mediaEpoch() == null) log("AUDIO: 宝马原车通话开始，暂缓发送实时媒体")
         receiverAudioClock.noteBorrow(guard.isAudioBorrowed())
@@ -759,7 +769,7 @@ class AirPlayClient(
         ModeChangeResult(sendCurrentModesLocked(), returned)
     }
 
-    private fun sendCurrentModesLocked(reassertingOwnership: Boolean = false): Boolean {
+    private fun sendCurrentModesLocked(reassertingOwnership: Boolean = false, previewGeneration: Int? = null): Boolean {
         val guard = borrowGuardLocked()
         if (!reassertingOwnership || controllerInputRevision != guard.controllerInputRevision()) controllerInputRevision = null
         val resources = guard.resources()
@@ -783,6 +793,8 @@ class AirPlayClient(
                     "/command",
                     body,
                     contentType = "application/x-apple-binary-plist",
+                    expectedGeneration = previewGeneration,
+                    timeoutMillis = if (previewGeneration == null) 10_000 else 2_000,
                 )
             log("AIRPLAY: modesChanged（当前资源声明）[$statusLine] ${borrowGuardLocked().summary()}")
             (statusLine.substringAfter(' ', "").substringBefore(' ') == "200").also { accepted ->
@@ -870,6 +882,9 @@ class AirPlayClient(
         // `hidDevices uuids=[]` / `displayUuid=null` 两个结果，看不到原因。
         var infoRoot: Map<*, *>? = null
         val infoMap = loadInfoWithDiagnostics()
+        if (infoMap != null && BmwControlIapCompatibility.matches(receiverIdentity())) {
+            synchronized(modeStateLock) { borrowGuardLocked().seedNavigationFromModes(infoMap["modes"] as? Map<*, *>) }
+        }
         infoRoot = infoMap
         val display = (infoMap?.get("displays") as? List<*>)?.firstOrNull() as? Map<*, *>
         if (display == null) {
@@ -1465,6 +1480,66 @@ class AirPlayClient(
     @Volatile
     private var iapLink: VirtualIap2Link? = null
 
+    internal enum class ParkedGuidanceResult(val message: String) {
+        SUBMITTED("已提交。请观察方向盘前的仪表是否出现相同的箭头和米数，约 6 秒后是否消失，然后导出日志。"),
+        NO_SUBSCRIPTION("车机尚无可用的导航订阅，或核对仍在进行。请导出日志。"),
+        SOURCE_UNAVAILABLE("原车导航正在使用或状态未知。请保持停车，导出日志。"),
+        MODE_UNCONFIRMED("车机未确认手机导航状态。请导出日志。"),
+        EXPIRED("连接或地图提示已变化，请重新从地图取提示。"),
+        RESTORING("上一次导航状态仍待恢复。请保持停车，断开 CarDeck 后导出日志。"),
+    }
+
+    internal fun tryParkedBmwGuidance(turnLeft: Boolean, meters: Int, stillCurrent: () -> Boolean): ParkedGuidanceResult =
+        synchronized(modeStateLock) {
+            val link = iapLink
+            val generation = readerGeneration
+            if (cancelled || cipher == null || !isSessionAlive() || link == null || !stillCurrent()) {
+                return@synchronized ParkedGuidanceResult.EXPIRED
+            }
+            if (parkedPreviewToken != null) return@synchronized ParkedGuidanceResult.RESTORING
+            if (!link.canShowParkedGuidance()) return@synchronized ParkedGuidanceResult.NO_SUBSCRIPTION
+            val guard = borrowGuardLocked()
+            if (!guard.beginParkedNavigation()) {
+                log("CLUSTER: 停车核对未开始，原车导航活动或尚未确认空闲")
+                return@synchronized ParkedGuidanceResult.SOURCE_UNAVAILABLE
+            }
+            val token = Any()
+            parkedPreviewToken = token
+            val accepted = sendCurrentModesLocked(previewGeneration = generation)
+            log("CLUSTER: 手机导航模式开始 车机确认=$accepted")
+            val result = when {
+                !accepted -> ParkedGuidanceResult.MODE_UNCONFIRMED
+                !stillCurrent() || generation != readerGeneration || iapLink !== link -> ParkedGuidanceResult.EXPIRED
+                link.tryParkedBmwGuidance(turnLeft, meters) { queueNavigationRestore(token, generation) } ->
+                    ParkedGuidanceResult.SUBMITTED
+                else -> ParkedGuidanceResult.NO_SUBSCRIPTION
+            }
+            if (result != ParkedGuidanceResult.SUBMITTED) queueNavigationRestore(token, generation)
+            result
+        }
+
+    /** The link has flushed its last guidance messages to this queue before it requests restoration. */
+    private fun queueNavigationRestore(token: Any, generation: Int) {
+        controlIapTx.execute {
+            synchronized(modeStateLock) {
+                if (parkedPreviewToken !== token || generation != readerGeneration || cancelled || !isSessionAlive()) return@execute
+                val guard = borrowGuardLocked()
+                guard.endParkedNavigation()
+                // A timed-out start can already have reached the receiver; send the current mode even then.
+                repeat(2) { attempt ->
+                    if (generation != readerGeneration || cancelled || !isSessionAlive()) return@execute
+                    val restored = sendCurrentModesLocked(previewGeneration = generation)
+                    log("CLUSTER: 手机导航模式结束 车机确认=$restored 次数=${attempt + 1}")
+                    if (restored) {
+                        parkedPreviewToken = null
+                        return@execute
+                    }
+                }
+                log("CLUSTER: 车机未确认模式恢复，请停车断开 CarDeck")
+            }
+        }
+    }
+
     /**
      * 车机媒体键回调（方向盘/面板的上一曲、下一曲）。
      *
@@ -1551,7 +1626,8 @@ class AirPlayClient(
                     "IAPLINK: tx(控制通道) #$controlIapCount ${frame.size}B [$statusLine]" +
                         (if (frameSummary.isEmpty()) "" else " $frameSummary elapsed=${SystemClock.elapsedRealtime() - startedAt}ms") +
                         (if (reply.isEmpty()) "" else " resp=${reply.size}B hex=" + hexPrefix(reply))
-                if (controlIapCount <= 10 || controlIapCount % 50 == 0 || reply.isNotEmpty()) {
+                val guidanceReply = frameSummary.endsWith(" csm=0x5201") || frameSummary.endsWith(" csm=0x5202")
+                if (guidanceReply || controlIapCount <= 10 || controlIapCount % 50 == 0 || reply.isNotEmpty()) {
                     log(head)
                 }
                 // 车机可能把链路字节直接塞在应答体里（而不是另发事件通道）：认出来就喂给
@@ -3052,7 +3128,9 @@ class AirPlayClient(
                 "deviceID=${root["deviceID"]}" +
                 if (features != null) " features=0x${features.toString(16)}" else "",
         )
-        (root["displays"] as? List<*>)?.forEachIndexed { index, display ->
+        val displays = root["displays"] as? List<*>
+        log("CLUSTER: 本次连接接收端公布的显示器数量=${displays?.size ?: "未知"}")
+        displays?.forEachIndexed { index, display ->
             log("AIRPLAY: /info displays[$index]=$display")
             if (display is Map<*, *>) {
                 log(

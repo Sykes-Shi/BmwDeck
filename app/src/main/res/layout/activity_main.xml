@@ -1367,6 +1367,27 @@
                             android:src="@drawable/ic_export" />
                     </LinearLayout>
 
+                    <Button
+                        android:id="@+id/btnExportMapSample"
+                        style="?android:attr/borderlessButtonStyle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="导出仪表地图样张" />
+
+                    <Button
+                        android:id="@+id/btnExportMapClip"
+                        style="?android:attr/borderlessButtonStyle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="导出 5 秒地图视频" />
+
+                    <Button
+                        android:id="@+id/btnExportGuidanceSnapshot"
+                        style="?android:attr/borderlessButtonStyle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="导出百度导航提示" />
+
                     <FrameLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
