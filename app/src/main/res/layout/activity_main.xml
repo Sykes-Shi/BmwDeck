@@ -701,7 +701,8 @@
                     style="?attr/borderlessButtonStyle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="本地歌词" />
+                    android:text="本地歌词"
+                    android:textColor="@android:color/white" />
             </LinearLayout>
 
             <!-- ==================== VPN 共存（实验） ==================== -->
@@ -710,7 +711,8 @@
                 style="?android:attr/borderlessButtonStyle"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="车机实体按键" />
+                android:text="车机实体按键"
+                android:textColor="@android:color/white" />
 
             <TextView
                 android:layout_width="match_parent"

@@ -9,6 +9,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import io.github.shaonialife.cardeck.R
 import io.github.shaonialife.cardeck.SessionController
 import io.github.shaonialife.cardeck.input.CarShortcutLearning
 import io.github.shaonialife.cardeck.input.PhoneBixby
@@ -19,11 +20,13 @@ import io.github.shaonialife.cardeck.input.ShortcutCalibration.Phase
 import io.github.shaonialife.cardeck.launcher.CarShortcut
 
 internal class CarShortcutDialog(private val activity: AppCompatActivity) {
+    private fun dialogBuilder() = AlertDialog.Builder(activity, R.style.PhoneDiagnosticDialog)
+
     fun open() {
         val gen = SessionController.shortcutCalibrationGeneration()
         val learned = gen?.let { CarShortcutLearning.labels(activity, it) }
         if (gen == null || learned == null) {
-            AlertDialog.Builder(activity).setTitle("车机实体按键")
+            dialogBuilder().setTitle("车机实体按键")
                 .setMessage("按键校准需要先连接 BMW 并打开 CarDeck 画面。可先在手机试用 Bixby。")
                 .setPositiveButton("试用 Bixby") { _, _ -> testBixby() }.setNegativeButton("关闭", null).show()
             return
@@ -33,17 +36,17 @@ internal class CarShortcutDialog(private val activity: AppCompatActivity) {
             CarShortcut.NAV to "百度地图搜目的地")
         val rows = keys.map { "${it.name} → ${labels.getValue(it)}" + if (it in learned) "　已校准" else "" } +
             listOf("检测方向盘拨号键", "检测旋钮明暗变化", "清除校准")
-        AlertDialog.Builder(activity).setTitle("车机实体按键").setItems(rows.toTypedArray()) { _, index ->
+        dialogBuilder().setTitle("车机实体按键").setItems(rows.toTypedArray()) { _, index ->
             if (index < keys.size) capture(gen, keys[index]) else if (index == keys.size) detectDial(gen)
             else if (index == keys.size + 1) {
-                AlertDialog.Builder(activity).setTitle("检测旋钮明暗变化")
+                dialogBuilder().setTitle("检测旋钮明暗变化")
                     .setMessage("停车后，让车机停在容易复现的静止页面。开始后先停两秒，再慢慢来回转动旋钮。12 秒内会记录投屏画面两处的明暗数值，结束后可导出日志。")
                     .setPositiveButton("开始") { _, _ ->
                         val message = if (VirtualLauncher.startRotaryBrightnessProbe(gen)) "检测已开始" else "请先连接 CarDeck"
                         Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
                     }.setNegativeButton("取消", null).show()
             } else {
-                AlertDialog.Builder(activity).setMessage("清除本车的按键校准和共用信号记录？")
+                dialogBuilder().setMessage("清除本车的按键校准和共用信号记录？")
                     .setPositiveButton("清除") { _, _ -> CarShortcutLearning.reset(activity, gen) }
                     .setNegativeButton("取消", null).show()
             }
@@ -64,7 +67,7 @@ internal class CarShortcutDialog(private val activity: AppCompatActivity) {
     private fun detectDial(gen: Long) {
         val sample = SessionController.steeringDialProbe.start(gen, SystemClock.elapsedRealtime())
         SessionController.appendLog("BMW-DIAL: sample started")
-        val dialog = AlertDialog.Builder(activity).setTitle("检测方向盘拨号键")
+        val dialog = dialogBuilder().setTitle("检测方向盘拨号键")
             .setMessage("停车后，在 8 秒内按一次方向盘拨号键，然后等待结果。期间请勿操作车机触屏或旋钮。")
             .setPositiveButton("关闭", null).show()
         val handler = Handler(Looper.getMainLooper())
@@ -91,7 +94,7 @@ internal class CarShortcutDialog(private val activity: AppCompatActivity) {
         val attempt = CarShortcutLearning.start(activity, gen, key) ?: return
         val handler = Handler(Looper.getMainLooper())
         val temporary = CarShortcutLearning.isTemporary(gen)
-        val dialog = AlertDialog.Builder(activity).setTitle("校准 ${key.name}").setMessage("")
+        val dialog = dialogBuilder().setTitle("校准 ${key.name}").setMessage("")
             .setPositiveButton("再按一次", null).setNegativeButton("取消", null).create()
         val update = object : Runnable {
             override fun run() {

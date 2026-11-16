@@ -6,7 +6,8 @@
 
 - 普通体验请选择 **中控试用版**：用于中控屏的地图、音乐与应用界面。
 - **仪表测试版**是独立实验分支，不等于仪表地图已适配成功，新手不必安装。两版使用不同应用身份，需分别授权；一次只连接一版。
-- 安装包以项目 [Releases](https://github.com/Sykes-Shi/CarDeck-BMW/releases) 中实际公布的附件为准。没有附件时请勿把 Source code 压缩包当成 APK，或从不明转载渠道下载安装。
+- [下载 V46 中控公开试用版](https://github.com/Sykes-Shi/CarDeck-BMW/releases/download/v46-public-preview/CarDeck-BMW-v46-public.apk)，在 [发布说明](https://github.com/Sykes-Shi/CarDeck-BMW/releases/tag/v46-public-preview) 核对 SHA-256 和证书指纹。不要把 Source code 压缩包当作 APK。
+- 旧 Android Debug 签名的中控试用版无法覆盖升级到本次正式签名版。先保存需要的设置/日志，再卸载旧中控版并安装新包、重新授权；卸载会清除应用本地数据。新用户直接安装。本次不是对手机进行系统更新。
 
 ## 第一次使用：六步
 

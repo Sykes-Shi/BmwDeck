@@ -21,3 +21,8 @@ app/src/test/resources/carplay/fixtures/*.jsonl
 
 # Kotlin build state
 .kotlin/
+
+# Public signing material must stay outside the repository
+*.p12
+*.pfx
+*.dpapi

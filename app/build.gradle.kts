@@ -1,56 +1,33 @@
-import java.util.Properties
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
-/**
- * 版本号约定：`MAJOR.MINOR.PATCH`（语义化版本）。
- *
- * `versionCode` 由 `versionName` **推导**而不是手填两处——两者不同步是更新失效的
- * 经典原因（系统只看 versionCode，填小了用户装不上新包，且不会有任何提示）。
- * 0.x 表示实验性阶段；发布前只需改这一行。
- */
+// Public trial uses a dedicated certificate stored outside this repository.
+// Missing signing environment produces an unsigned APK, never a debug-signed release.
 val appVersionName = "0.1.13"
-val appVersionCode =
-    appVersionName
-        .split(".")
-        .let { (major, minor, patch) -> major.toInt() * 10_000 + minor.toInt() * 100 + patch.toInt() }
-
-/**
- * 发布签名配置：从仓库外的 `keystore.properties` 读取（已在 .gitignore 排除）。
- * 文件缺失时 release 退回 **debug 签名**——这样 fork 者与 CI 无需私钥也能
- * `assembleRelease` 出可安装的包；正式发布务必配置真实签名。
- *
- * 密钥泄露 = 任何人可签发你的更新，因此 keystore 与密码**绝不入库**。
- */
-val keystorePropsFile = rootProject.file("keystore.properties")
-val keystoreProps =
-    Properties().apply {
-        if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
-    }
-val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
-
+val publicStorePath = System.getenv("CARDECK_RELEASE_STORE")
+val publicStorePassword = System.getenv("CARDECK_RELEASE_PASSWORD")
+val hasReleaseKeystore = publicStorePath != null && publicStorePassword != null
 android {
     namespace = "io.github.shaonialife.cardeck"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.github.shaonialife.cardeck"
+        applicationId = "io.github.shaonialife.cardeck.bmwprobe"
         minSdk = 31
         targetSdk = 34
-        versionCode = appVersionCode
-        versionName = appVersionName
+        versionCode = 160
+        versionName = "$appVersionName-v46-public"
     }
 
     signingConfigs {
         if (hasReleaseKeystore) {
             create("release") {
-                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
-                storePassword = keystoreProps.getProperty("storePassword")
-                keyAlias = keystoreProps.getProperty("keyAlias")
-                keyPassword = keystoreProps.getProperty("keyPassword")
+                storeFile = file(requireNotNull(publicStorePath))
+                storePassword = publicStorePassword
+                keyAlias = "cardeck-bmw"
+                keyPassword = publicStorePassword
             }
         }
     }
@@ -61,12 +38,12 @@ android {
             // 自定义 AIDL，R8 需要额外 keep 规则；首版先保证可运行，混淆留待后续。
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName(if (hasReleaseKeystore) "release" else "debug")
+            signingConfig = if (hasReleaseKeystore) signingConfigs.getByName("release") else null
         }
         debug {
-            // Standalone experimental copy: keep the official installation and data intact.
-            applicationIdSuffix = ".bmwprobe"
-            versionNameSuffix = "-v45-center"
+            // Keep local developer builds separate from the public trial.
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
         }
     }
 
@@ -92,10 +69,10 @@ android {
     }
 }
 
-// 只提升独立诊断包的升级序号，官方 release 的版本和签名配置保持原值。
+// Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(157) }
+        variant.outputs.forEach { output -> output.versionCode.set(158) }
     }
 }
 
