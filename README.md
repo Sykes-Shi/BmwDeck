@@ -4,6 +4,16 @@ CarDeck-BMW 基于开源项目 [CarDeck](https://github.com/shaonialife/cardeck)
 
 CarDeck-BMW is an experimental Android project based on [CarDeck](https://github.com/shaonialife/cardeck), optimized for BMW iDrive 7 head units. It builds on the upstream project's wireless CarPlay sender and adds BMW-specific compatibility and interface work.
 
+## 新手入口
+
+- [安装与首次连接教程](docs/QUICKSTART.md)：安装到安卓手机 → 启动 Shizuku → 配对宝马 → 启动连接。
+- [版本更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Sykes-Shi/CarDeck-BMW/issues)
+- 试用 APK 的公开签名发布正在准备；以 [Releases](https://github.com/Sykes-Shi/CarDeck-BMW/releases) 中实际附件为准，没有 APK 附件时请勿把源码压缩包当作安装包。
+
+## ID6 社区反馈（2026 年 11 月）
+
+有一位社区用户反馈：其 **原车带无线 CarPlay 的 ID6** 已实现安卓手机直连。该反馈来自项目抖音视频评论；车型、手机型号、软件版本及各项功能尚未完整核实，**不是所有 ID6 均兼容的保证**。本项目仍主要围绕 iDrive 7 优化，欢迎在 Issues 补充具体测试配置与结果；没有无线 CarPlay 的车机不能据此视为可用。
+
 ## 项目状态
 
 当前仓库源码对应 **V45 中控试用版**，在 V39 中控版本基础上继续优化，仍在开发和实车验证中。宝马车型、车机版本和手机系统存在差异，连接、声音、网络、导航和按键功能的表现可能不同。请在停车时完成配置和操作，并保留原车导航等备用方式。完整说明见 [免责声明](DISCLAIMER.md)。
