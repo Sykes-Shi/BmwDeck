@@ -1,5 +1,6 @@
 package io.github.shaonialife.cardeck.launcher.settings
 
+import android.content.ComponentName
 import android.content.Context
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -8,6 +9,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import io.github.shaonialife.cardeck.R
 import io.github.shaonialife.cardeck.launcher.DesktopApps
+import io.github.shaonialife.cardeck.launcher.SettingsActivity
 import io.github.shaonialife.cardeck.launcher.VirtualLauncher
 
 /** 设置列表行：分组标题 / 拼音字母标题 / 应用（三个应用列表共用）。 */
@@ -166,6 +168,7 @@ abstract class AppRowsAdapter(
     abstract class AppHolder(
         row: android.view.View,
     ) : RecyclerView.ViewHolder(row) {
+        internal var boundComponent: ComponentName? = null
         abstract fun bind(entry: VirtualLauncher.AppEntry)
     }
 
@@ -197,7 +200,14 @@ abstract class AppRowsAdapter(
     ) {
         when (val row = rows[position]) {
             is SettingsRow.Header -> (holder as SettingsRows.HeaderHolder).bind(row.title)
-            is SettingsRow.App -> (holder as AppHolder).bind(row.entry)
+            is SettingsRow.App -> {
+                val appHolder = holder as AppHolder
+                if (appHolder.boundComponent != row.entry.component) {
+                    (fragment.activity as? SettingsActivity)?.onAppRowReassigned(appHolder.itemView)
+                    appHolder.boundComponent = row.entry.component
+                }
+                appHolder.bind(row.entry)
+            }
         }
     }
 }

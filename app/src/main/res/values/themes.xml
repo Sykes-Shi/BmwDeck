@@ -12,6 +12,7 @@
         <item name="deckText">@color/car_text</item>
         <item name="deckSecondary">@color/car_text_muted</item>
         <item name="deckAccent">@color/car_accent</item>
+        <item name="deckAppFocusSurface">#59A9CEFA</item>
         <item name="deckOnAccent">@color/car_on_accent</item>
         <item name="deckRipple">@color/car_control_ripple</item>
         <item name="deckRaised">#344252</item>

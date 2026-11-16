@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ComponentName
+import android.content.res.ColorStateList
 import android.graphics.Rect
 import android.os.BatteryManager
 import android.os.Bundle
@@ -280,9 +281,18 @@ class DockActivity : CarAppearanceActivity() {
         applyDockPrefs()
         clockView?.setTextColor(carPalette.text)
         batteryText?.setTextColor(carPalette.secondary)
-        val tint = android.content.res.ColorStateList.valueOf(carPalette.text)
-        home.imageTintList = tint
-        mapButton.imageTintList = tint
+        val palette = carPalette
+        val glyphTint = ColorStateList(
+            arrayOf(intArrayOf(android.R.attr.state_activated), intArrayOf()),
+            intArrayOf(palette.onAccent, palette.text),
+        )
+        for (button in listOf(home, mapButton)) {
+            palette.background(button, R.drawable.bg_dock_control)
+            button.imageTintList = glyphTint
+        }
+        appsContainer?.let { container ->
+            for (i in 0 until container.childCount) palette.background(container.getChildAt(i), R.drawable.bg_dock_control)
+        }
     }
 
     override fun onStart() {
@@ -457,6 +467,7 @@ class DockActivity : CarAppearanceActivity() {
             container.addView(
                 ImageView(this).apply {
                     tag = component
+                    carPalette.background(this, R.drawable.bg_dock_control)
                     setImageBitmap(bitmap)
                     setPadding(pad, pad, pad, pad)
                     contentDescription = component.shortClassName

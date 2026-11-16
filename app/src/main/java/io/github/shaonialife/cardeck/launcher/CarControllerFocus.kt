@@ -1,38 +1,52 @@
 package io.github.shaonialife.cardeck.launcher
 
 import android.graphics.Rect
-import android.graphics.drawable.Drawable
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
-import io.github.shaonialife.cardeck.R
 
-/** A visible cursor for CarDeck's touch-first controls. Never changes a control's background. */
-internal class CarControllerFocus {
-    private companion object {
-        var owner = java.lang.ref.WeakReference<CarControllerFocus>(null)
+/** Shares a single visible rotary cursor across the dock and the content display. */
+internal class CarControllerFocus(private val onAppearance: ((View, Boolean) -> Unit)? = null) {
+    companion object {
+        private var owner = java.lang.ref.WeakReference<CarControllerFocus>(null)
+
+        /** A recycled row can acquire a new action without losing its window. */
+        fun clearIfSelected(view: View) {
+            val cursor = owner.get() ?: return
+            if (cursor.selected === view) cursor.clear()
+        }
     }
+
     private var selected: View? = null
-    private var ring: Drawable? = null
+    private val attachment = object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(view: View) = Unit
+        override fun onViewDetachedFromWindow(view: View) = clearIfSelected(view)
+    }
 
     fun clear() {
-        ring?.let { selected?.overlay?.remove(it) }
-        ring = null
+        selected?.let {
+            it.removeOnAttachStateChangeListener(attachment)
+            onAppearance?.invoke(it, false)
+            it.isActivated = false
+        }
         selected = null
         if (owner.get() === this) owner.clear()
     }
 
     fun select(view: View) {
-        if (selected === view && ring != null) return
-        if (owner.get() !== this) owner.get()?.clear()
-        clear()
-        val border = requireNotNull(view.context.getDrawable(R.drawable.car_controller_focus)).mutate()
-        border.setBounds(0, 0, view.width, view.height)
-        view.overlay.add(border)
+        if (selected === view) return
+        owner.get()?.clear()
         selected = view
-        ring = border
         owner = java.lang.ref.WeakReference(this)
+        view.addOnAttachStateChangeListener(attachment)
+        view.isActivated = true
+        onAppearance?.invoke(view, true)
+    }
+
+    /** A modal owns the visible focus while it is open. Keep the rotary position for Back. */
+    fun showAnchorHighlight(anchor: View, visible: Boolean) {
+        if (selected === anchor && owner.get() === this) anchor.isActivated = visible
     }
 
     private fun controls(root: View): List<Pair<View, ControllerFocusTraversal.Point>> {
@@ -80,7 +94,9 @@ internal class CarControllerFocus {
 
 /** The phone settings Activity has its own input behavior. Only car-hosted pages use this base. */
 abstract class CarControllerActivity : CarAppearanceActivity() {
-    private val controllerFocus = CarControllerFocus()
+    private val controllerFocus = CarControllerFocus(::onRotaryAppearance)
+
+    protected open fun onRotaryAppearance(view: View, active: Boolean) = Unit
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val displayId = display?.displayId ?: -1

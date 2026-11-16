@@ -406,8 +406,11 @@ class CarInputServiceImpl(
         if (android.os.Build.VERSION.SDK_INT < 34 || name !in setOf("CarPlayApp", "CarPlayAppHi", "CarPlayMap")) return -1
         val flags = runCatching {
             val type = android.hardware.display.DisplayManager::class.java
-            type.getField("VIRTUAL_DISPLAY_FLAG_OWN_FOCUS").getInt(null) or
-                type.getField("VIRTUAL_DISPLAY_FLAG_STEAL_TOP_FOCUS_DISABLED").getInt(null)
+            val ownFocus = type.getField("VIRTUAL_DISPLAY_FLAG_OWN_FOCUS").getInt(null)
+            // The IME checks the top-focused display even when the editor has its own per-display focus.
+            // A tap on the map must be able to move that display to the top; other displays stay isolated.
+            if (name == "CarPlayMap") ownFocus else
+                ownFocus or type.getField("VIRTUAL_DISPLAY_FLAG_STEAL_TOP_FOCUS_DISABLED").getInt(null)
         }.getOrElse { return -1 }
         return createManagedDisplay(name, width, height, dpi, surface, true, flags)
     }

@@ -2,4 +2,8 @@
 <resources>
     <string name="dashboard_destination_title">目的地</string>
     <string name="dashboard_destination_cancel">取消</string>
+    <string name="phone_destination_entry">用手机输入地名</string>
+    <string name="phone_destination_hint">输入地名，在车机百度地图查看结果</string>
+    <string name="phone_destination_submit">在车机搜索</string>
+    <string name="phone_destination_failed">搜索未送达，请在车机打开「新目的地」后重试</string>
 </resources>

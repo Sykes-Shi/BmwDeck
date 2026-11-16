@@ -340,6 +340,9 @@ object ScreenDimmer {
                 }
                 mainHandler.removeCallbacks(owner.showRunnable)
                 // 遵从真实锁屏；不唤醒、不解除 keyguard、不盖住解锁界面。
+                if (sessionActive && (intent.action == Intent.ACTION_SCREEN_ON || intent.action == Intent.ACTION_USER_PRESENT)) {
+                    io.github.shaonialife.cardeck.SessionController.audioSender?.onPhoneWake()
+                }
                 if (!screenState(owner.context).allowsDim()) hideDim(owner) else if (enabled && sessionActive) schedule(owner)
                 emit(owner.context, "event=$event ${diagnosticSnapshot(owner.context)}")
             }

@@ -1,5 +1,6 @@
 package io.github.shaonialife.cardeck.render
 
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.opengl.EGL14
 import android.opengl.EGLConfig
@@ -126,6 +127,41 @@ class DualDisplayComposer(
     /** 当前应用区显示的是超采样屏（true）还是原生屏（false）。触摸路由以它为准。 */
     @Volatile
     private var activeAppHi = false
+
+    private data class VideoBackdrop(
+        val hi: Boolean, val revision: Long, val expires: Long, val bands: KidsVideoBackdrop.Bands,
+    )
+    @Volatile private var videoBackdrop: VideoBackdrop? = null
+
+    internal fun clearKidsVideoBackdrop() {
+        if (videoBackdrop != null) {
+            videoBackdrop = null
+            overlayDirty = true
+        }
+    }
+
+    /** Worker only. Sample the original app surface before the backdrop is composited. */
+    internal fun sampleKidsVideo(hi: Boolean, revision: Long, playing: Boolean, motion: KidsVideoBackdrop.Motion): Boolean {
+        val input = (if (hi) appHi else appInput) ?: return false
+        val probe = Bitmap.createBitmap(KidsVideoBackdrop.WIDTH, KidsVideoBackdrop.HEIGHT, Bitmap.Config.ARGB_8888)
+        SurfaceFrameCopy.copyInto(input.surface, probe, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(700))
+        val bands = try {
+            val colors = IntArray(probe.width * probe.height)
+            probe.getPixels(colors, 0, probe.width, 0, 0, probe.width, probe.height)
+            val detected = KidsVideoBackdrop.detect(colors, input.geometry.width.toFloat() / input.geometry.height)
+            if (detected == null) motion.reset()
+            detected?.takeIf { motion.isMoving(colors, android.os.SystemClock.uptimeMillis()) || playing }
+        } finally {
+            probe.recycle()
+        }
+        if (bands == null || !running.get() || activeAppHi != hi || VirtualLauncher.presentationRevision() != revision) {
+            clearKidsVideoBackdrop()
+            return false
+        }
+        videoBackdrop = VideoBackdrop(hi, revision, android.os.SystemClock.uptimeMillis() + 1800L, bands)
+        overlayDirty = true
+        return true
+    }
 
     /** 待切换的目标屏（true=超采样屏；null=无待切换）；切屏等目标出帧，避免闪黑/闪旧帧。 */
     @Volatile
@@ -283,10 +319,13 @@ class DualDisplayComposer(
         glThread = null
     }
 
+    private data class InputSize(val width: Int, val height: Int)
+
     private class Input(
         val texture: Int,
         val surfaceTexture: SurfaceTexture,
         val surface: Surface,
+        @Volatile var geometry: InputSize,
     ) {
         @Volatile
         var hasNewFrame = false
@@ -372,7 +411,7 @@ class DualDisplayComposer(
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             val st = SurfaceTexture(tex[0])
             st.setDefaultBufferSize(width, height)
-            val input = Input(tex[0], st, Surface(st))
+            val input = Input(tex[0], st, Surface(st), InputSize(width, height))
             st.setOnFrameAvailableListener { input.hasNewFrame = true }
             return input
         }
@@ -392,6 +431,9 @@ class DualDisplayComposer(
         val uClipEnabled = GLES20.glGetUniformLocation(program, "uClipEnabled")
         val uClipRect = GLES20.glGetUniformLocation(program, "uClipRect")
         val uClipRadius = GLES20.glGetUniformLocation(program, "uClipRadius")
+        val uWingBounds = GLES20.glGetUniformLocation(program, "uWingBounds")
+        val uWingLeft = GLES20.glGetUniformLocation(program, "uWingLeft")
+        val uWingRight = GLES20.glGetUniformLocation(program, "uWingRight")
         GLES20.glUniform1i(uTexture, 0)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
 
@@ -486,7 +528,17 @@ class DualDisplayComposer(
             u0: Float = 0f,
             u1: Float = 1f,
             cornerRadius: Float = 0f,
+            bands: KidsVideoBackdrop.Bands? = null,
         ) {
+            if (bands == null) {
+                GLES20.glUniform4f(uWingBounds, 0f, 0f, 0f, 0f)
+            } else {
+                fun color(location: Int, rgb: Int) = GLES20.glUniform3f(location,
+                    (rgb ushr 16 and 255) / 255f, (rgb ushr 8 and 255) / 255f, (rgb and 255) / 255f)
+                GLES20.glUniform4f(uWingBounds, x0, x0 + (x1 - x0) * bands.left, x0 + (x1 - x0) * bands.right, x1)
+                color(uWingLeft, bands.leftColor)
+                color(uWingRight, bands.rightColor)
+            }
             input.surfaceTexture.getTransformMatrix(matrix)
             GLES20.glUniformMatrix4fv(uSTMatrix, 1, false, matrix, 0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, input.texture)
@@ -631,7 +683,13 @@ class DualDisplayComposer(
                 }
             } else {
                 if (activeInput?.hasContent == true) {
-                    drawInput(activeInput, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
+                    val backdrop = videoBackdrop
+                    val bands = backdrop?.takeIf {
+                        tileLayout == TileLayout.HIDDEN && it.hi == activeAppHi &&
+                            it.revision == VirtualLauncher.presentationRevision() &&
+                            android.os.SystemClock.uptimeMillis() < it.expires
+                    }?.bands
+                    drawInputUV(activeInput, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat(), bands = bands)
                 }
                 // 地图层叠在应用区之上（HIDDEN 不画）：
                 //  FULLSCREEN=整个应用区；SPLIT=左半卡片区域。
@@ -769,6 +827,9 @@ class DualDisplayComposer(
                 uniform int uClipEnabled;
                 uniform vec4 uClipRect;
                 uniform float uClipRadius;
+                uniform vec4 uWingBounds;
+                uniform vec3 uWingLeft;
+                uniform vec3 uWingRight;
                 void main() {
                     if (uClipEnabled == 1) {
                         vec2 p = gl_FragCoord.xy;
@@ -776,7 +837,23 @@ class DualDisplayComposer(
                         vec2 c = clamp(p, uClipRect.xy + half2, uClipRect.zw - half2);
                         if (distance(p, c) > uClipRadius) discard;
                     }
-                    gl_FragColor = texture2D(uTexture, vTexCoord);
+                    vec4 original = texture2D(uTexture, vTexCoord);
+                    float x = gl_FragCoord.x;
+                    if (uWingBounds.w > 0.0 && (x < uWingBounds.y || x > uWingBounds.z)) {
+                        bool left = x < uWingBounds.y;
+                        float f = left ? (x-uWingBounds.x)/(uWingBounds.y-uWingBounds.x)
+                                       : (uWingBounds.w-x)/(uWingBounds.w-uWingBounds.z);
+                        float lumaMax = max(original.r, max(original.g, original.b));
+                        float black = 1.0 - smoothstep(0.01, 0.055, lumaMax);
+                        // A newly opened full-width menu can arrive before the next worker sample.
+                        vec3 edges = max(texture2D(uTexture, vec2(0.025,vTexCoord.y)).rgb,
+                                         texture2D(uTexture, vec2(0.975,vTexCoord.y)).rgb);
+                        black *= 1.0 - smoothstep(0.025, 0.06, max(edges.r, max(edges.g,edges.b)));
+                        original.rgb += (left ? uWingLeft : uWingRight) *
+                            (0.17 + 0.30 * smoothstep(0.0, 1.0, f)) *
+                            (1.0 - smoothstep(0.86, 1.0, f)) * black;
+                    }
+                    gl_FragColor = original;
                 }
                 """.trimIndent()
             } else {

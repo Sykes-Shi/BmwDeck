@@ -1,11 +1,8 @@
 package io.github.shaonialife.cardeck.launcher
 
 import android.app.Dialog
-import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.StateListDrawable
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
@@ -121,16 +118,9 @@ internal class DashboardDestinationDialog(
         heading.setTextColor(palette.text)
         for ((index, row) in rows.withIndex()) {
             val choice = choices.getOrNull(index)
-            palette.background(row, if (choice == null) R.drawable.bg_destination_cancel else R.drawable.bg_car_media_button)
-            row.setTextColor(if (choice == null) palette.secondary else palette.text)
-            // Android Button's default focus halo depends on the phone theme.
-            row.foreground = StateListDrawable().apply {
-                addState(intArrayOf(android.R.attr.state_focused), GradientDrawable().apply {
-                    cornerRadius = dp(12).toFloat()
-                    setColor(Color.TRANSPARENT)
-                    setStroke(dp(3), palette.accent)
-                })
-            }
+            palette.focusButton(row, if (choice == null) R.drawable.bg_destination_cancel else R.drawable.bg_car_media_button, 12, nativeFocus = true)
+            row.setTextColor(palette.focusContent(if (choice == null) palette.secondary else palette.text, nativeFocus = true))
+            row.compoundDrawableTintList = palette.focusContent(palette.accent, nativeFocus = true)
         }
         styleRowContent()
     }
@@ -148,7 +138,6 @@ internal class DashboardDestinationDialog(
             row.compoundDrawablePadding = dp(10)
             row.setCompoundDrawablesRelative(icon?.let {
                 context.getDrawable(it)?.mutate()?.apply {
-                    setTint(palette.accent)
                     setBounds(0, 0, dp(22), dp(22))
                 }
             }, null, null, null)

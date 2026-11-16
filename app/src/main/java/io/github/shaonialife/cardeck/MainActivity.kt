@@ -69,6 +69,7 @@ class MainActivity : AppCompatActivity() {
         const val KEY_DISCLAIMER_DEADLINE = "disclaimer_deadline"
     }
 
+    private val phoneDestinationInput by lazy { io.github.shaonialife.cardeck.ui.PhoneDestinationInput(this) }
     private lateinit var deviceSubtitle: TextView
     private lateinit var shizukuChip: TextView
     private lateinit var shizukuDesc: TextView
@@ -641,6 +642,7 @@ class MainActivity : AppCompatActivity() {
         }
         heroSubline = findViewById(R.id.heroSubline)
         heroStats = findViewById(R.id.heroStats)
+        findViewById<View>(R.id.btnPhoneDestination).setOnClickListener { phoneDestinationInput.open() }
         findViewById<View>(R.id.btnRefreshBmwScreen).setOnClickListener { SessionController.requestBmwScreenRefresh() }
         heroProgress = findViewById(R.id.heroProgress)
         ctaButton = findViewById(R.id.ctaButton)
@@ -1046,6 +1048,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun tickHero() {
         dismissStaleWifiDialog()
+        val searchTarget = VirtualLauncher.currentDestinationInput()
+        phoneDestinationInput.dismissIfStale(searchTarget)
+        findViewById<View>(R.id.btnPhoneDestination).visibility = if (searchTarget != null) View.VISIBLE else View.GONE
         val s =
             when {
                 SessionController.videoSender?.isRunning == true -> HeroState.CONNECTED
@@ -2536,6 +2541,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        phoneDestinationInput.dismissIfStale(null)
         super.onDestroy()
         wifiJoinDialog?.cancel()
         wifiJoinDialog = null

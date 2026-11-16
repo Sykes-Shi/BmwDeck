@@ -22,6 +22,7 @@ import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.DASH_GAP_PX
 import io.github.shaonialife.cardeck.render.DASH_HANDLE_TOUCH_PX
 import io.github.shaonialife.cardeck.render.DualDisplayComposer
+import io.github.shaonialife.cardeck.render.KidsVideoBackdrop
 import io.github.shaonialife.cardeck.render.OverlayCard
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
 import io.github.shaonialife.cardeck.shizuku.Shell
@@ -72,6 +73,7 @@ object VirtualLauncher {
     @Volatile private var settingsShortcut: ShortcutRequest? = null
     @Volatile private var mediaShortcut: ShortcutRequest? = null
     @Volatile private var lastShortcutMusic: String? = null
+    @Volatile private var destinationInput: DestinationInputTarget? = null
 
     /** 实时模式不重建显示或音视频会话；地图操作另有修订号。 */
     fun isPhoneNavigationActive(): Boolean = launchSession.phoneNavigation.enabled
@@ -951,6 +953,7 @@ object VirtualLauncher {
             shortcutGate.reset()
             settingsShortcut = null
             mediaShortcut = null
+            destinationInput = null
             AppOrientationCompat.endSession()
             // 先使排队操作失效，并让实时切换立即看到连接结束。
             launchSession = LaunchSession(launchGenerations.incrementAndGet())
@@ -1568,12 +1571,13 @@ object VirtualLauncher {
 
     private fun sendBaiduPage(
         context: Context, displayId: Int, page: BaiduMapPage, current: () -> Boolean, mapTaskId: Int? = null,
+        uri: String = page.uri,
     ): Boolean {
         val generation = sessionGeneration()
         if (displayId <= 0 || isPhoneNavigationActive() || !current()) return false
         AppOrientationCompat.awaitPending()
         if (!current()) return false
-        val receiver = BaiduCruise.resolveComponent(context, page) ?: run {
+        val receiver = BaiduCruise.resolveComponent(context, uri) ?: run {
             logSink?.invoke("MAP: 已安装客户端未提供${page.label}入口")
             return false
         }
@@ -1586,7 +1590,7 @@ object VirtualLauncher {
         }
         if (!current()) return false
         val result = Shell.exec(
-            "am start -a android.intent.action.VIEW -d ${shellArgument(page.uri)} " +
+            "am start -a android.intent.action.VIEW -d ${shellArgument(uri)} " +
                 "-n ${shellArgument(receiver.flattenToString())} --display $displayId$flags 2>&1",
             timeoutMs = 8000,
         )
@@ -1769,6 +1773,12 @@ object VirtualLauncher {
             // Reveal the requested car display even if this ROM is late reporting its
             // foreground window. The old placement gate could leave a successful launch hidden.
             showMap()
+            if (destination == BaiduDestination.NEW && current()) {
+                io.github.shaonialife.cardeck.SessionController.currentClient?.let { client ->
+                    destinationInput = DestinationInputTarget(display, request.session.generation,
+                        request.session.navigationRevision, request.presentation, client.controllerInputRevision)
+                }
+            }
             // Baidu uses its own saved place or opens its address setup. It owns guidance
             // and permission prompts. Never replay an accepted request or infer guidance from foreground placement.
             var placement = before
@@ -1798,7 +1808,46 @@ object VirtualLauncher {
                 return
             }
             logSink?.invoke("SHORTCUT: NAV display=$display task=${placement.taskId} foreground=${placement.activity != null} poiSearch=unconfirmed")
-            showShortcutNotice(request, "如仍在地图页，点搜索框输入新目的地")
+            showShortcutNotice(request, "点地图搜索框，也可在手机 CarDeck 输入地名")
+        }
+    }
+
+    /** An input dialog opened for an old car screen must not send its place to a later session. */
+    internal fun currentDestinationInput(): DestinationInputTarget? {
+        val target = destinationInput ?: return null
+        val client = io.github.shaonialife.cardeck.SessionController.currentClient ?: return null
+        return target.takeIf {
+            !client.cancelled && mapFullscreen && !isPhoneNavigationActive() && appContextRef != null &&
+                it.matches(mapDisplayId, sessionGeneration(), navigationRevision(), presentationRevision(), client.controllerInputRevision)
+        }
+    }
+
+    /** Called on a background thread after the user submits the phone keyboard. */
+    internal fun searchFromPhone(target: DestinationInputTarget, text: String): Boolean {
+        val uri = baiduKeywordSearchUri(text) ?: return false
+        val ctx = appContextRef ?: return false
+        fun current() = currentDestinationInput() === target
+        return mapLaunchLock.withLock {
+            if (!current()) return@withLock false
+            val foreground = currentBaiduPlacement(target.display).activity ?: return@withLock false
+            sendBaiduPage(ctx, target.display, BaiduMapPage.DESTINATION, ::current, foreground.taskId, uri)
+        }
+    }
+
+    internal fun observeDestinationKeyboard(display: Int) {
+        val target = currentDestinationInput() ?: return
+        if (display != target.display || !target.claimKeyboardProbe(SystemClock.elapsedRealtime())) return
+        Bg.run("map-keyboard") {
+            SystemClock.sleep(550)
+            if (currentDestinationInput() !== target) return@run
+            // Filter on the device: never export IME text, suggestions, editor info or search terms.
+            val state = Shell.exec("dumpsys -t 2 input_method | grep -oE " +
+                "'mCurTokenDisplayId=-?[0-9]+|mInputShown=(true|false)' | head -n 2", 3000)
+            if (currentDestinationInput() === target) {
+                logSink?.invoke("MAP: 搜索键盘 target=$display " + state.output.lineSequence()
+                    .filter { it.matches(Regex("mCurTokenDisplayId=-?[0-9]+|mInputShown=(true|false)")) }
+                    .joinToString(" ").ifEmpty { "state=unknown" })
+            }
         }
     }
 
@@ -1991,6 +2040,13 @@ object VirtualLauncher {
             }
             // 合成器切到目标屏（超采样屏等其出帧再切；原生屏即时切换）
             composer?.requestActiveApp(targetDisplay == appHiDisplayId)
+            if (!dockAtBottom && component.packageName == KidsVideoBackdrop.PACKAGE) {
+                composer?.let { target ->
+                    if (kidsVideoGeneration.getAndSet(session.generation) != session.generation) {
+                        monitorKidsVideo(session.generation, target)
+                    }
+                }
+            }
             // 应用已在运行、被系统按旧配置带回前台的情况：启动后探测一次是否仍
             // letterbox（提示卡只对「应用横屏」名单内的应用生效，其它应用不计）
             val ctx = appContextRef
@@ -2136,6 +2192,49 @@ object VirtualLauncher {
                 isDaemon = true
                 start()
             }
+    }
+
+    private val kidsVideoGeneration = java.util.concurrent.atomic.AtomicLong(-1)
+
+    /** Follow the actual foreground once this app has opened, including return via Back or Recents. */
+    private fun monitorKidsVideo(generation: Long, target: DualDisplayComposer) = Bg.run("kids-video-backdrop") {
+        val pkg = KidsVideoBackdrop.PACKAGE
+        val motion = KidsVideoBackdrop.Motion()
+        logSink?.invoke("VIDEO: 小小优趣播放器适配已就绪")
+        var lastApplied = false
+        fun live() = isCurrentSession(generation) && composer === target
+        while (live()) {
+            var playerVisible = false
+            val revision = presentationRevision()
+            val hi = target.isActiveAppHi()
+            val display = if (hi) appHiDisplayId else appDisplayId
+            val applied = runCatching {
+                if (display <= 0 || dashboardMode || mapFullscreen) return@runCatching false
+                val top = Shell.exec(
+                    "dumpsys -t 1 activity activities | grep -E '^[[:space:]]*(Display[ :]|topResumedActivity|mResumedActivity|Resumed:)'",
+                    timeoutMs = 1500,
+                )
+                if (!top.ok) return@runCatching false
+                val activity = mapPackagePlacement(display, top.output, pkg).activity ?: return@runCatching false
+                val name = activity.component.substringAfter('/').substringAfterLast('.')
+                val playback = io.github.shaonialife.cardeck.media.MediaSessionsState.forPackage(pkg)?.playing == true
+                playerVisible = playback || name.contains("Player", true) || name.contains("VideoPlay", true) ||
+                    Shell.exec("dumpsys -t 1 SurfaceFlinger --list | grep -F '$pkg/' | grep -Em1 'SurfaceView|VideoSurface'", 1500).let {
+                        it.ok && it.output.isNotBlank()
+                    }
+                if (!playerVisible || !live() || revision != presentationRevision() || hi != target.isActiveAppHi()) {
+                    return@runCatching false
+                }
+                target.sampleKidsVideo(hi, revision, playback, motion)
+            }.getOrDefault(false)
+            if (!applied) target.clearKidsVideoBackdrop()
+            if (!playerVisible) motion.reset()
+            if (applied != lastApplied && live()) {
+                logSink?.invoke("VIDEO: 小小优趣画面两翼" + if (applied) "开启" else "恢复原样")
+                lastApplied = applied
+            }
+            Thread.sleep(if (playerVisible) 700L else 2500L)
+        }
     }
 
     /**

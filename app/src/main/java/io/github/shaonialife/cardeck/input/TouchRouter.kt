@@ -260,6 +260,7 @@ object TouchRouter {
                         svc.pointerUp(pressedDisplay, localX, localY)
                     }
                 }
+            if (ok && routedToMap && !contact.down) launcher.observeDestinationKeyboard(targetDisplay)
             if (ok) lastInjectAt = nowMs
             if (!ok) {
                 diag(

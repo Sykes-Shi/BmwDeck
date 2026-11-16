@@ -1629,6 +1629,7 @@ object SessionController {
                     // 接收端只能「按到达时刻猜」，严格的实现干脆不排播（2026-10-20 实测）。
                     controlPort = audio.controlPort,
                     mediaEpoch = client::currentMediaEpoch,
+                    compensatePhoneWake = BmwControlIapCompatibility.matches(identity),
                 )
             val activated =
                 io.github.shaonialife.cardeck.audio.AudioActivationSequence.afterSetup(

@@ -236,6 +236,18 @@
                     android:textColor="@color/m3_primary"
                     android:visibility="gone" />
 
+                <Button
+                    android:id="@+id/btnPhoneDestination"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:minHeight="48dp"
+                    android:background="@drawable/bg_icon_tile"
+                    android:paddingHorizontal="20dp"
+                    android:text="@string/phone_destination_entry"
+                    android:textColor="@color/m3_primary"
+                    android:visibility="gone" />
+
                 <LinearLayout
                     android:id="@+id/ctaButton"
                     android:layout_width="match_parent"

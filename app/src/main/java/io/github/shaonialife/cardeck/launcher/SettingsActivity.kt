@@ -1,6 +1,7 @@
 package io.github.shaonialife.cardeck.launcher
 
 import android.os.Bundle
+import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
@@ -31,6 +32,7 @@ class SettingsActivity :
     private var toastView: TextView? = null
     private val menus = mutableListOf<LinearLayout>()
     private var currentMenu = -1
+    private var rotaryHighlight: SettingsRotaryHighlight? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -136,8 +138,29 @@ class SettingsActivity :
         showMenu(index)
     }
 
+    override fun onRotaryAppearance(view: View, active: Boolean) {
+        rotaryHighlight?.clear()
+        rotaryHighlight = if (active) SettingsRotaryHighlight(view, carPalette) else null
+    }
+
+    /** A recycled app row can be rebound while the screen stays open. */
+    internal fun onAppRowReassigned(row: View) {
+        val target = rotaryHighlight?.target ?: return
+        var parent: View? = target
+        while (parent != null) {
+            if (parent === row) {
+                CarControllerFocus.clearIfSelected(target)
+                return
+            }
+            parent = parent.parent as? View
+        }
+    }
+
     override fun onCarAppearanceChanged(day: Boolean) {
         val menu = findViewById<LinearLayout>(R.id.settingsMenu) ?: return
+        val focused = rotaryHighlight?.target
+        rotaryHighlight?.clear()
+        rotaryHighlight = null
         menu.setBackgroundColor(carPalette.surface)
         menu.findViewById<TextView>(R.id.btnBack).apply {
             setTextColor(carPalette.accent)
@@ -156,15 +179,16 @@ class SettingsActivity :
             }
         }
         applyMenuStyle(currentMenu)
+        if (focused?.isActivated == true) onRotaryAppearance(focused, true)
     }
 
     private fun applyMenuStyle(index: Int) {
         menus.forEachIndexed { i, menu ->
-            menu.isActivated = i == index
+            menu.isSelected = i == index
             for (c in 0 until menu.childCount) {
                 val child = menu.getChildAt(c)
                 if (child is TextView) {
-                    child.setTextColor(if (menu.isActivated) carPalette.text else carPalette.secondary)
+                    child.setTextColor(if (menu.isSelected) carPalette.text else carPalette.secondary)
                     child.paint.isFakeBoldText = i == index
                 }
             }

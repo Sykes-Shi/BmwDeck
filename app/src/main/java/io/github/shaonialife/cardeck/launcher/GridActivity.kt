@@ -274,7 +274,7 @@ class GridActivity : CarAppearanceActivity() {
             }
         }
         val hasArt = now?.art != null
-        dashboardBackdrop?.bind(now?.art, now?.backdropColor ?: ArtworkTone.DEFAULT, carPalette)
+        dashboardBackdrop?.bind(now?.art, now?.backdropColor ?: ArtworkTone.DEFAULT, now?.daylightColor, carPalette)
         panel.findViewById<View>(R.id.dashArtworkVeil).visibility = if (hasArt) View.VISIBLE else View.GONE
         panel.findViewById<View>(R.id.dashScrim).visibility = if (hasArt) View.GONE else View.VISIBLE
         val elapsed = android.os.SystemClock.elapsedRealtime()
@@ -447,10 +447,17 @@ class GridActivity : CarAppearanceActivity() {
                 showDashboardFeedback("请在车机显示 CarDeck 首页时重试")
             }
         }
-        dialog.setOnDismissListener { if (destinationDialog === dialog) destinationDialog = null }
+        val anchor = panel.findViewById<View>(R.id.dashBaiduDestination)
+        dialog.setOnDismissListener {
+            if (destinationDialog === dialog) {
+                destinationDialog = null
+                controllerFocus.showAnchorHighlight(anchor, true)
+            }
+        }
         if (dialog.updateBounds()) {
             destinationDialog = dialog
             dialog.show()
+            controllerFocus.showAnchorHighlight(anchor, false)
         }
     }
 
@@ -617,8 +624,9 @@ class GridActivity : CarAppearanceActivity() {
         refreshDashWallpaper()
         destinationDialog?.applyPalette(carPalette)
         val root = findViewById<View>(R.id.gridPager) ?: return
-        (root as ViewGroup).descendants.filterIsInstance<TextView>()
-            .filter { it.id == R.id.cellLabel }.forEach(carPalette::cellLabel)
+        (root as ViewGroup).descendants.forEach { child ->
+            if (child.id == R.id.cellLabel) carPalette.appCell(child.parent as View, child as TextView)
+        }
         dashboardView?.let {
             carPalette.media((it.parent as? View) ?: it)
             applyDashCardChrome()
@@ -936,6 +944,7 @@ class GridActivity : CarAppearanceActivity() {
         private val grid: GridLayout,
     ) : RecyclerView.ViewHolder(grid) {
         fun bind(page: Int) {
+            for (i in 0 until grid.childCount) CarControllerFocus.clearIfSelected(grid.getChildAt(i))
             grid.removeAllViews()
             pages[page].forEach { cell ->
                 val view = layoutInflater.inflate(R.layout.item_app_cell, grid, false)
@@ -944,7 +953,7 @@ class GridActivity : CarAppearanceActivity() {
                         layoutParams = LinearLayout.LayoutParams(iconSizePx, iconSizePx)
                     }
                 val label = view.findViewById<TextView>(R.id.cellLabel)
-                carPalette.cellLabel(label)
+                carPalette.appCell(view, label)
                 when (cell) {
                     is Cell.Dashboard -> Unit // 仪表盘独立成页，不进网格
                     is Cell.Pinned -> {

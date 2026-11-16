@@ -63,6 +63,7 @@ class AudioSender(
     private val controlPort: Int = 0,
     /** Null while BMW is handling its other phone. Equal epochs identify uninterrupted media. */
     private val mediaEpoch: () -> Long? = { 0L },
+    compensatePhoneWake: Boolean = false,
 ) {
     private val captureMode = AudioCaptureMode
 
@@ -159,6 +160,11 @@ class AudioSender(
      * 「当前/下一包时间戳」，否则锚点里的时间戳永远对不上真实发出的包。
      */
     private val rtp = AudioRtpCursor(samplesPerPacket)
+    private val wakeTimeline = if (compensatePhoneWake) AudioWakeTimeline(sampleRate) else null
+
+    internal fun onPhoneWake() {
+        if (running.get()) wakeTimeline?.woke(android.os.SystemClock.elapsedRealtimeNanos(), mediaEpoch())
+    }
     private var selfChecked = false
 
     /** 每包/每帧对应的 PCM 字节数（PCM 通路=一包的负载；AAC 通路=一帧的输入）。 */
@@ -437,17 +443,18 @@ class AudioSender(
             Thread(
                 {
                     var syncSequence = 0
-                    var lastSyncEpoch: Long? = null
+                    var lastSyncSegment: Long? = null
                     val cadence = AudioSyncCadence()
                     try {
                         while (running.get() && !client.isClosed) {
                             val epoch = mediaEpoch()
-                            if (epoch == null || (epoch != 0L && rtp.lastEpoch != epoch) || !cadence.allow(epoch)) {
+                            val position = rtp.syncPosition()
+                            if (epoch == null || (epoch != 0L && position.epoch != epoch) || !cadence.allow(position.segment)) {
                                 Thread.sleep(250)
                                 continue
                             }
-                            val first = lastSyncEpoch != epoch
-                            val next = rtp.timestamp
+                            val first = lastSyncSegment != position.segment
+                            val next = position.timestamp
                             val current = (next - samplesPerPacket).coerceAtLeast(0L)
                             val ntp = TimingServer.ntpFromNanos(System.nanoTime())
                             val packet = AudioSyncPacket.build(syncSequence, current, next, ntp, first)
@@ -460,14 +467,14 @@ class AudioSender(
                                         it.message?.contains("ECONNREFUSED") == true
                                 }
                                 if (!refused) throw error
-                                cadence.refused(epoch)
+                                cadence.refused(position.segment)
                                 log("AUDIO: 同步口拒绝，暂停此段锚点 epoch=$epoch")
                                 continue
                             }
                             syncSequence = (syncSequence + 1) and 0xFFFF
                             if (first) {
-                                lastSyncEpoch = epoch
-                                log("AUDIO: 已发送媒体同步锚点 epoch=$epoch ts=$current→$next")
+                                lastSyncSegment = position.segment
+                                log("AUDIO: 已发送媒体同步锚点 epoch=$epoch segment=${position.segment} ts=$current→$next")
                             }
                             Thread.sleep(SYNC_INTERVAL_MILLIS)
                         }
@@ -610,13 +617,18 @@ class AudioSender(
         var wireBytes = 0
         var sent = false
         return try {
-            val first = rtp.lastEpoch != epoch
-            val wire = sealPacket(payload, rtp.sequence, rtp.timestamp, rtp.nonce, first)
+            val missing = wakeTimeline?.missingSamples(sendStartedNs, rtp.timestamp, epoch) ?: 0L
+            val first = rtp.lastEpoch != epoch || missing > 0
+            val wire = sealPacket(payload, rtp.sequence, rtp.timestamp + missing, rtp.nonce, first)
             wireBytes = wire.size
-            rtp.advance(epoch)
             val client = socket ?: return false
             client.send(DatagramPacket(wire, wire.size))
-            if (first && epoch != 0L) log("AUDIO: 已发出通话后首个媒体包 sender=$diagnosticSenderId epoch=$epoch")
+            rtp.advance(epoch, missing)
+            if (missing > 0) {
+                log("AUDIO: 手机唤醒后重新对齐播放时钟 sender=$diagnosticSenderId epoch=$epoch missingSamples=$missing sampleRate=$sampleRate")
+            } else if (first && epoch != 0L) {
+                log("AUDIO: 已发出通话后首个媒体包 sender=$diagnosticSenderId epoch=$epoch")
+            }
             packetsSent++
             bytesSent += wire.size
             sent = true

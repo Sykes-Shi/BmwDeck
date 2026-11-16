@@ -6,6 +6,7 @@
     <attr name="deckText" format="color" />
     <attr name="deckSecondary" format="color" />
     <attr name="deckAccent" format="color" />
+    <attr name="deckAppFocusSurface" format="color" />
     <attr name="deckOnAccent" format="color" />
     <attr name="deckRipple" format="color" />
     <attr name="deckRaised" format="color" />
@@ -19,6 +20,7 @@
         <item name="deckText">#14293B</item>
         <item name="deckSecondary">#394F61</item>
         <item name="deckAccent">#175879</item>
+        <item name="deckAppFocusSurface">#66175879</item>
         <item name="deckOnAccent">#FFFFFF</item>
         <item name="deckRipple">#331B587E</item>
         <item name="deckRaised">#F4F8FA</item>

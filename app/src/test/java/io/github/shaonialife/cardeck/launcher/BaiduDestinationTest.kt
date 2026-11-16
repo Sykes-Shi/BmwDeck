@@ -46,6 +46,19 @@ class BaiduDestinationTest {
         assertNull(baiduOnMapDisplay(42, dump.replace("com.other.app/.Top", "com.baidu.BaiduMap.fake/.Maps")).activity)
     }
 
+    @Test fun selectedPackageMustBeForegroundOnItsOwnDisplay() {
+        val dump = """
+            Display #0 (activities from top to bottom):
+              topResumedActivity=ActivityRecord{abc u0 com.baidu.BaiduMap/.Maps t7}
+            Display #42 (activities from top to bottom):
+              topResumedActivity=ActivityRecord{123 u0 com.autonavi.minimap/.Map t9}
+              * Hist #0: ActivityRecord{def u0 com.baidu.BaiduMap/.Maps t8}
+        """.trimIndent()
+        assertNull(mapPackagePlacement(42, dump, "com.baidu.BaiduMap").activity)
+        assertNull(mapPackagePlacement(0, dump, "com.baidu.BaiduMap").activity)
+        assertEquals("com.autonavi.minimap/.Map", mapPackagePlacement(42, dump, "com.autonavi.minimap").activity?.component)
+    }
+
     @Test fun android16DecimalIdentityAndDisplayAreaResumedLinePlaceExistingCarTask() {
         val dump = """
             Display #74 (activities from top to bottom):

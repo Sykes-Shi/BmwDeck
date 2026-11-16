@@ -29,7 +29,10 @@ internal data class BaiduMapPlacement(
 
 /** Android 16 prints decimal ActivityRecord identities but accepts hex dump selectors.
  * Use the task ID and component instead; both also identify the target on older versions. */
-internal fun baiduOnMapDisplay(display: Int, dump: String): BaiduMapPlacement {
+internal fun baiduOnMapDisplay(display: Int, dump: String): BaiduMapPlacement =
+    mapPackagePlacement(display, dump, BaiduCruise.PACKAGE)
+
+internal fun mapPackagePlacement(display: Int, dump: String, packageName: String): BaiduMapPlacement {
     if (display <= 0) return BaiduMapPlacement()
     var onTarget = false
     var sawTop = false
@@ -46,11 +49,11 @@ internal fun baiduOnMapDisplay(display: Int, dump: String): BaiduMapPlacement {
         val record = displayActivity.find(line) ?: continue
         val task = record.groupValues[3].toIntOrNull() ?: continue
         val component = record.groupValues[2]
-        val baidu = component.substringBefore('/') == BaiduCruise.PACKAGE
-        if (baidu && existingTask == null) existingTask = task
+        val matchesPackage = component.substringBefore('/') == packageName
+        if (matchesPackage && existingTask == null) existingTask = task
         if (!sawTop && !record.groupValues[1].startsWith("* Hist")) {
             sawTop = true
-            if (baidu) top = BaiduMapActivity(component, task)
+            if (matchesPackage) top = BaiduMapActivity(component, task)
         }
     }
     return BaiduMapPlacement(top, top?.taskId ?: existingTask)
@@ -94,9 +97,9 @@ object BaiduCruise {
     private const val PREFS_NAME = "settings"
     private const val KEY_AUTOMATIC = "baiduCruiseOnNewMapTask"
 
-    internal fun resolveComponent(context: Context, page: BaiduMapPage): ComponentName? =
+    internal fun resolveComponent(context: Context, uri: String): ComponentName? =
         runCatching {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(page.uri)).setPackage(PACKAGE)
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri)).setPackage(PACKAGE)
             val activity =
                 context.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo
                     ?: return@runCatching null

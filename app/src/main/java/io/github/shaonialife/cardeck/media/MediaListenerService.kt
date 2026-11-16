@@ -103,6 +103,7 @@ class MediaListenerService : NotificationListenerService() {
     private class ArtEntry(val key: Any, val sampledAt: Long) {
         @Volatile var bitmap: android.graphics.Bitmap? = null
         @Volatile var color: Int = ArtworkTone.DEFAULT
+        @Volatile var daylightColor: Int? = null
     }
 
     /** 同时保存各播放器封面，暂停的网易云页面不会借用其他应用封面。仅保留活跃包。 */
@@ -202,6 +203,7 @@ class MediaListenerService : NotificationListenerService() {
                     mediaId = meta?.getString(MediaMetadata.METADATA_KEY_MEDIA_ID),
                     album = meta?.getString(MediaMetadata.METADATA_KEY_ALBUM),
                     backdropColor = artCache[controller.packageName]?.color ?: ArtworkTone.DEFAULT,
+                    daylightColor = artCache[controller.packageName]?.daylightColor,
                 )
             }
         MediaSessionsState.publishAll(snapshots, primary?.packageName, playbackEvent)
@@ -321,6 +323,7 @@ class MediaListenerService : NotificationListenerService() {
                     val y = ((index / 8 + 0.5f) * readable.height / 8).toInt().coerceIn(0, readable.height - 1)
                     pixels[index] = readable.getPixel(x, y)
                 }
+                entry.daylightColor = ArtworkTone.daylightColor(pixels)
                 ArtworkTone.fromPixels(pixels)
             } finally {
                 if (readable !== bitmap) readable.recycle()
@@ -373,6 +376,7 @@ object MediaSessionsState {
         val backdropColor: Int = ArtworkTone.DEFAULT,
         val mediaId: String? = null,
         val album: String? = null,
+        val daylightColor: Int? = null,
     ) {
         /** 渲染时刻的推算播放位置（播放中按速度外推，钳制在时长内）。 */
         fun displayPositionAt(elapsedRealtimeMs: Long): Long {
@@ -437,7 +441,8 @@ object MediaSessionsState {
         old?.title == value?.title && old?.artist == value?.artist && old?.playing == value?.playing &&
             old?.art === value?.art && old?.pkg == value?.pkg && old?.actions == value?.actions &&
             old?.sessionToken == value?.sessionToken && old?.durationMs == value?.durationMs &&
-            old?.lyrics == value?.lyrics && old?.backdropColor == value?.backdropColor
+            old?.lyrics == value?.lyrics && old?.backdropColor == value?.backdropColor &&
+            old?.daylightColor == value?.daylightColor
 
     /**
      * 通知使用权是否已授予。

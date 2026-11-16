@@ -187,7 +187,7 @@ class CarMediaActivity : CarControllerActivity() {
             cover.setImageBitmap(artwork)
         }
         cover.visibility = if (artwork == null) View.INVISIBLE else View.VISIBLE
-        backdrop?.bind(artwork, now?.backdropColor ?: ArtworkTone.DEFAULT, carPalette)
+        backdrop?.bind(artwork, now?.backdropColor ?: ArtworkTone.DEFAULT, now?.daylightColor, carPalette)
         val lyricText = if (MediaSessionsState.accessGranted) now?.lyricTextAt(elapsed) else null
         val lyricStatus = if (MediaSessionsState.accessGranted && now != null && now.lyrics == null) {
             io.github.shaonialife.cardeck.media.OnlineLyrics.statusFor(this, now.pkg, now.title, now.artist, now.durationMs)

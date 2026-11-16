@@ -12,9 +12,15 @@ internal class AudioRtpCursor(private val samplesPerPacket: Long) {
     @Volatile var lastEpoch: Long? = null
         private set
 
-    fun advance(epoch: Long) {
+    internal data class SyncPosition(val timestamp: Long, val epoch: Long?, val segment: Long)
+    private var segment = 0L
+
+    @Synchronized fun syncPosition() = SyncPosition(timestamp, lastEpoch, segment)
+
+    @Synchronized fun advance(epoch: Long, missingSamples: Long = 0) {
+        if (missingSamples > 0 || epoch != (lastEpoch ?: 0L)) segment++
         sequence = (sequence + 1) and 0xFFFF
-        timestamp += samplesPerPacket
+        timestamp += samplesPerPacket + missingSamples
         nonce++
         lastEpoch = epoch
     }
