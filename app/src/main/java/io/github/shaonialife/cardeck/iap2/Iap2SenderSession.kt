@@ -272,7 +272,11 @@ class Iap2SenderSession(
                 val wifiDeadline = if (bmwProbe) minOf(deadline, System.nanoTime() + 1_500_000_000L) else deadline
                 val wifiConfiguration = expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, wifiDeadline)
                 if (wifiConfiguration == null) {
-                    log("iap2 0x5703 未在窗口内到达——改走 0x4300/0x4301（新版协议自带 AP 信息）")
+                    if (channel.isAlive) {
+                        log("iap2 0x5703 未在窗口内到达——尝试 0x4300/0x4301（新版协议可能自带 AP 信息）")
+                    } else {
+                        log("iap2 等待 0x5703 结束时蓝牙链路已关闭——未收到热点凭据")
+                    }
                     null
                 } else {
                     val parsed = parseWifiConfiguration(wifiConfiguration)

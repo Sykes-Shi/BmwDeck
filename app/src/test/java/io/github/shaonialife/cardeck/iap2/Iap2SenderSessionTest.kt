@@ -27,6 +27,7 @@ class Iap2SenderSessionTest {
         EMPTY_START_THEN_WIFI,
         WIFI_DURING_HID,
         START_DURING_HID,
+        CLOSE_WHILE_WAITING_WIFI,
         CLOSE_AFTER_AVAILABILITY,
         MALFORMED_WIFI,
         BOTH_AFTER_AVAILABILITY,
@@ -98,7 +99,16 @@ class Iap2SenderSessionTest {
         assertNull(result.endpoint)
         assertTrue(result.failure!!.message.orEmpty().contains("本次未取得车机热点凭据"))
         assertTrue(result.events.any { it.contains("继续等待 0x5703/0x4301") })
+        assertTrue(result.events.any { it.contains("0x5703 未在窗口内到达") })
         assertTrue("The 8 s late window must not extend the overall deadline", result.elapsedMillis < 4_000)
+    }
+
+    @Test
+    fun closedLinkWhileWaitingForWifiIsNotReportedAsTimeout() {
+        val result = runBmwScenario(BmwResponse.CLOSE_WHILE_WAITING_WIFI)
+        assertTrue(result.events.any { it.contains("等待 0x5703 结束时蓝牙链路已关闭") })
+        assertTrue(result.events.none { it.contains("0x5703 未在窗口内到达") })
+        assertNotNull("The fixture must terminate the phone channel", result.millisAfterChannelClose)
     }
 
     @Test
@@ -495,6 +505,10 @@ class Iap2SenderSessionTest {
             // WiFi 配置
             if (!bmwNoProbeExpected && bmwResponse != BmwResponse.WIFI_DURING_HID) {
                 expect(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
+            }
+            if (bmwResponse == BmwResponse.CLOSE_WHILE_WAITING_WIFI) {
+                onBmwClose?.invoke() ?: channel.close()
+                return
             }
             // 迟到一条订阅请求（真实车机 bring-up 常见：0x5000 与 0x5703 相邻到达）。
             // 它必须被暂存而不是在 expectOrNull 里被反复重读——旧实现把非预期帧塞回

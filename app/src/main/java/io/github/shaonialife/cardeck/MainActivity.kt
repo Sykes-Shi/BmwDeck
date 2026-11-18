@@ -31,6 +31,7 @@ import io.github.shaonialife.cardeck.audio.AudioCaptureMode
 import io.github.shaonialife.cardeck.audio.AudioSender
 import io.github.shaonialife.cardeck.bt.BluetoothCompatibilityPrefs
 import io.github.shaonialife.cardeck.bt.BtProfiles
+import io.github.shaonialife.cardeck.bt.PairingProfileCleanup
 import io.github.shaonialife.cardeck.bt.TargetDevicePrefs
 import io.github.shaonialife.cardeck.input.TouchRouter
 import io.github.shaonialife.cardeck.launcher.VirtualLauncher
@@ -1743,26 +1744,42 @@ class MainActivity : AppCompatActivity() {
                 // 先关弹窗再提示：snackbar 在 Activity 窗口内，弹窗未关时会被盖住
                 dialog.dismiss()
                 setTarget(device, name)
-                // 「只配对、不连接」：系统/车机在配对完成后常会自动建立 HFP/A2DP
-                // 连接，而奥迪实测这种「已连接」状态会让车机拒绝 CarPlay。立即与
-                // 1.5s 后各断一次（车机侧重连通常在这两个时间点之间发生）。
+                // Active sessions manage their own profile policy. The pairing-only
+                // cleanup must not override a session's snapshotted compatibility mode.
                 val app = applicationContext
-                Bg.run("bt-pair-only") {
-                    repeat(2) { attempt ->
-                        val dropped = BtProfiles.disconnect(app, device)
-                        if (dropped.isNotEmpty()) {
-                            log(
-                                "BT-PAIR: 已断开配对后自动建立的 ${dropped.joinToString("/")} 连接" +
-                                    "（保持仅配对，避免车机拒绝 CarPlay）",
-                            )
-                        }
-                        if (attempt == 0) {
-                            try {
-                                Thread.sleep(1_500)
-                            } catch (_: InterruptedException) {
-                                return@run
-                            }
-                        }
+                fun cleanupAllowed(): Boolean =
+                    BluetoothCompatibilityPrefs.get(app).disconnectProfiles &&
+                        !SessionController.isSessionRunning() &&
+                        TargetDevicePrefs.get(app)?.let { TargetDevicePrefs.matches(it, address) } == true
+                if (BluetoothCompatibilityPrefs.get(app).keepSystemBluetooth) {
+                    log("BT-PAIR: 已选择保留系统蓝牙连接，跳过配对后断开")
+                } else {
+                    Bg.run("bt-pair-only") {
+                        PairingProfileCleanup.run(
+                            allowed = ::cleanupAllowed,
+                            disconnect = {
+                                val before = BtProfiles.disconnect(
+                                    app, device,
+                                    isCurrent = ::cleanupAllowed,
+                                    runIfCurrent = { action ->
+                                        if (cleanupAllowed()) { action(); true } else false
+                                    },
+                                )
+                                if (before.isNotEmpty() && cleanupAllowed()) {
+                                    val result = BtProfiles.disconnectResult(app, address, before)
+                                    log("BT-PAIR: 配对后蓝牙断开操作：$result")
+                                }
+                            },
+                            pause = {
+                                try {
+                                    Thread.sleep(1_500)
+                                    true
+                                } catch (_: InterruptedException) {
+                                    Thread.currentThread().interrupt()
+                                    false
+                                }
+                            },
+                        )
                     }
                 }
             }
