@@ -13,6 +13,8 @@ import io.github.shaonialife.cardeck.audio.AudioSender
 import io.github.shaonialife.cardeck.audio.AudioTuning
 import io.github.shaonialife.cardeck.bt.BtProfiles
 import io.github.shaonialife.cardeck.bt.BtSessionGate
+import io.github.shaonialife.cardeck.bt.BluetoothCompatibilityPolicy
+import io.github.shaonialife.cardeck.bt.BluetoothCompatibilityPrefs
 import io.github.shaonialife.cardeck.bt.Iap2BluetoothClient
 import io.github.shaonialife.cardeck.bt.Iap2BluetoothServer
 import io.github.shaonialife.cardeck.bt.TargetDevicePrefs
@@ -232,6 +234,8 @@ object SessionController {
     @Volatile
     private var bluetoothServer: Iap2BluetoothServer? = null
     private var bluetoothClient: Iap2BluetoothClient? = null
+    @Volatile
+    private var activeBluetoothCompatibility = BluetoothCompatibilityPolicy()
     private var ctrlAdvertiser: CarPlayCtrlAdvertiser? = null
 
     /**
@@ -499,6 +503,8 @@ object SessionController {
                     onWifiCredentials = wifiCredentialHook,
                     onEndpointUpdate = { endpoint -> dispatchEndpoint(endpoint, "主动连车机", late = true) },
                     targetProvider = targetProvider,
+                    shouldDisconnectProfiles = { activeBluetoothCompatibility.disconnectProfiles },
+                    shouldProbeSelectedDevice = { activeBluetoothCompatibility.probeSelectedDevice },
                 )
             ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
             endpointBrowser =
@@ -542,6 +548,13 @@ object SessionController {
         if (ShizukuGate.state(context) != ShizukuGate.State.READY || !CarInputClient.isReady()) {
             appendLog("SHIZUKU: 触控服务未接通，已阻止启动；请在手机端重试准备")
             return
+        }
+        if (bluetoothClient?.isRunning != true) {
+            activeBluetoothCompatibility = BluetoothCompatibilityPrefs.get(context.applicationContext)
+            appendLog(
+                "BT-C: 本次蓝牙策略=" +
+                    if (activeBluetoothCompatibility.keepSystemBluetooth) "保留系统蓝牙连接（兼容测试）" else "原有策略",
+            )
         }
         val connectionEpoch = wifiJoins.activate(VpnCoexistencePrefs.isEnabled(context))
         connectCancelled = false
@@ -2343,11 +2356,7 @@ object SessionController {
                     if (pairedKeys != null || plainSession) {
                         phaseHint = if (pairedKeys != null) "配对完成，建立 CarPlay 会话…" else "建立明文会话…"
                         if (pairedKeys != null) {
-                            appendLog(
-                                "AIRPLAY: ✓ 配对完成 writeKey=" +
-                                    pairedKeys.phoneWriteKey.joinToString("") { "%02x".format(it) }.take(16) + "… " +
-                                    "readKey=" + pairedKeys.phoneReadKey.joinToString("") { "%02x".format(it) }.take(16) + "…",
-                            )
+                            appendLog("AIRPLAY: ✓ 配对完成")
                         }
                         // 已配对 → 共享密钥；明文会话 → null（流加密降级为 AES-CTR 零密钥）
                         var sessionKey = pairedKeys?.sharedSecret
@@ -2704,15 +2713,13 @@ object SessionController {
                                 // 建立失败不阻塞会话（触摸不可用但视频照常）。
                                 val tunnel = client.runIapTunnel(sessionKey)
                                 tunnel?.onIapMessage = { frame ->
-                                    // 触摸证据采集：先全量记录，格式确认后接 TouchRouter
+                                    // 仅保留消息类型及长度，避免泄露隧道中的凭据。
                                     if (frame.messageId != 0x0000) {
-                                        val hex = frame.body.joinToString(" ") { "%02x".format(it) }
                                         appendLog(
                                             "TUNNEL: rx 0x${frame.messageId.toString(16)} " +
                                                 "(${Iap2MessageIds.nameOf(
                                                     frame.messageId,
-                                                )}) ${frame.body.size}B" +
-                                                if (frame.body.isNotEmpty()) " hex=${hex.take(120)}" else "",
+                                                )}) ${frame.body.size}B",
                                         )
                                     }
                                 }

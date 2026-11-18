@@ -29,6 +29,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
 import io.github.shaonialife.cardeck.audio.AudioCaptureMode
 import io.github.shaonialife.cardeck.audio.AudioSender
+import io.github.shaonialife.cardeck.bt.BluetoothCompatibilityPrefs
 import io.github.shaonialife.cardeck.bt.BtProfiles
 import io.github.shaonialife.cardeck.bt.TargetDevicePrefs
 import io.github.shaonialife.cardeck.input.TouchRouter
@@ -889,6 +890,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         // ---- 连接准备 ----
+        findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchKeepSystemBluetooth).apply {
+            isChecked = BluetoothCompatibilityPrefs.get(this@MainActivity).keepSystemBluetooth
+            setOnCheckedChangeListener { _, checked ->
+                BluetoothCompatibilityPrefs.setKeepSystemBluetooth(this@MainActivity, checked)
+                snack("蓝牙兼容设置已保存，断开后重新启动连接生效")
+            }
+        }
         findViewById<TextView>(R.id.btnWifi).setOnClickListener {
             val ssid = ssidInput.text.toString().trim()
             // 自动加入不可用时的手动兜底：密码先进剪贴板，系统 WLAN 页粘贴即可

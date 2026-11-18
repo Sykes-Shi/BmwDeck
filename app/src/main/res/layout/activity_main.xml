@@ -510,6 +510,38 @@
                     android:layout_marginStart="54dp"
                     android:background="#5A394444" />
 
+                <!-- 原有断开蓝牙配置文件策略保留为默认，仅由用户主动启用兼容测试。 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingStart="54dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="10dp">
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        android:id="@+id/switchKeepSystemBluetooth"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp"
+                        android:text="保留系统蓝牙连接（兼容测试）"
+                        android:textColor="@color/m3_on_surface"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="连接异常时可尝试。断开 CarDeck 后切换，重新启动连接生效。"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginStart="54dp"
+                    android:background="#5A394444" />
+
                 <!-- 车机热点 -->
                 <LinearLayout
                     android:layout_width="match_parent"

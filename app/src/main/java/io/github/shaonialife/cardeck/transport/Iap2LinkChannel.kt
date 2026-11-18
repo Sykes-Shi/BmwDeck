@@ -25,7 +25,7 @@ class Iap2LinkChannel(
     private var terminated = false
     private var readySignalled = false
 
-    /** 原始字节转储预算（每方向每连接），真车字节级对照用。 */
+    /** 每方向的流量摘要预算，绝不记录可能含凭据的原始字节。 */
     private var rxDumpBudget = RAW_DUMP_LIMIT
     private var txDumpBudget = RAW_DUMP_LIMIT_TX
 
@@ -143,14 +143,11 @@ class Iap2LinkChannel(
         }
     }
 
-    /**
-     * 原始字节抓包（真车字节级对照的唯一手段）：每方向仅转储前
-     * [RAW_DUMP_LIMIT] 字节，防止长期会话日志爆炸。
-     */
+    /** 仅记录长度：数据可能包含热点密码和设备标识。 */
     private fun dumpInbound(bytes: ByteArray) {
         if (bytes.isEmpty() || rxDumpBudget <= 0) return
         val shown = minOf(bytes.size, rxDumpBudget)
-        log("RAW rx: " + bytes.copyOf(shown).joinToString(" ") { "%02x".format(it) })
+        log("LINK raw rx: bytes=${bytes.size}")
         rxDumpBudget -= shown
     }
 
@@ -218,7 +215,7 @@ class Iap2LinkChannel(
     private fun dumpOutbound(bytes: ByteArray) {
         if (txDumpBudget <= 0) return
         val shown = minOf(bytes.size, txDumpBudget)
-        log("RAW tx: " + bytes.copyOf(shown).joinToString(" ") { "%02x".format(it) })
+        log("LINK raw tx: bytes=${bytes.size}")
         txDumpBudget -= shown
     }
 
@@ -252,10 +249,7 @@ class Iap2LinkChannel(
     private companion object {
         const val PACER_POLL_MILLIS = 20L
 
-        /** 原始字节转储预算：rx 需覆盖车机全部协商帧（Audi 实测约 140B），给 512B 余量。 */
-        // 预算按字节计。曾为 512/256：一次完整 bring-up 都盖不住（0x1D01 单帧即 565B），
-        // 提取重放 fixture（tools/extract_car_fixtures.py）会缺尾部——提到 4096 覆盖
-        // 整个识别/MFi/凭据交换，长会话靠预算封顶防日志爆炸
+        /** 流量摘要预算按字节计；摘要仅含长度，不包含原始内容。 */
         const val RAW_DUMP_LIMIT = 4096
         const val RAW_DUMP_LIMIT_TX = 4096
 
