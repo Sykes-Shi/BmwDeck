@@ -233,6 +233,7 @@ object SessionController {
     /** DCL 双检锁的可发布字段（无 volatile 的双检锁是坏发布——虽然当前仅主线程调用，别留隐患）。 */
     @Volatile
     private var bluetoothServer: Iap2BluetoothServer? = null
+    @Volatile
     private var bluetoothClient: Iap2BluetoothClient? = null
     @Volatile
     private var activeBluetoothCompatibility = BluetoothCompatibilityPolicy()
@@ -539,6 +540,19 @@ object SessionController {
         videoSender?.isRunning == true ||
             bluetoothServer?.isRunning == true ||
             bluetoothClient?.isRunning == true
+
+    /** Pairing cleanup must honor both the current preference and a running session snapshot. */
+    fun allowsPostBondDisconnect(
+        context: Context,
+        targetMatches: Boolean,
+        isBonded: Boolean,
+        interrupted: Boolean,
+    ): Boolean {
+        val activeKeep = if (isSessionRunning()) activeBluetoothCompatibility.keepSystemBluetooth else null
+        return BluetoothCompatibilityPrefs.get(context.applicationContext).allowsPostBondDisconnect(
+            targetMatches, isBonded, interrupted, activeKeep,
+        )
+    }
 
     /**
      * 「启动连接」主体（权限检查由 Activity 完成后调用）：前台保活服务 + 双向蓝牙。

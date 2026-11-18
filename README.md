@@ -4,7 +4,7 @@ CarDeck-BMW 基于开源项目 [CarDeck](https://github.com/shaonialife/cardeck)
 
 CarDeck-BMW is an experimental Android project based on [CarDeck](https://github.com/shaonialife/cardeck), optimized for BMW iDrive 7 head units. It builds on the upstream project's wireless CarPlay sender and adds BMW-specific compatibility and interface work.
 
-> 本分支是基于 V46 的 OPPO / iDrive 8.5 蓝牙兼容测试分支，包含可选连接策略和补充诊断，尚待实车验证。测试步骤见 [OPPO / iDrive 8.5 兼容测试](docs/OPPO-ID85-TEST.md)；下面的 V46 下载链接仍是原公开试用版。
+> 本分支是基于 V46 的小米 / iDrive 7 蓝牙兼容测试分支，测试包默认保留系统蓝牙连接，尚待实车验证。测试步骤见 [小米 / iDrive 7 兼容测试](docs/XIAOMI-ID7-TEST.md)；下面的 V46 下载链接仍是原公开试用版。
 
 ## 新手入口
 

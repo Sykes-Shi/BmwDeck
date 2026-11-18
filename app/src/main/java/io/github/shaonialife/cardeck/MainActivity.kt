@@ -1743,18 +1743,36 @@ class MainActivity : AppCompatActivity() {
                 // 先关弹窗再提示：snackbar 在 Activity 窗口内，弹窗未关时会被盖住
                 dialog.dismiss()
                 setTarget(device, name)
-                // 「只配对、不连接」：系统/车机在配对完成后常会自动建立 HFP/A2DP
-                // 连接，而奥迪实测这种「已连接」状态会让车机拒绝 CarPlay。立即与
-                // 1.5s 后各断一次（车机侧重连通常在这两个时间点之间发生）。
+                // 两次尝试及设备级兜底均核对当前偏好、目标和配对状态；兼容模式
+                // 开启后不再主动断开系统蓝牙，等待期间切换目标也不会继续操作旧设备。
                 val app = applicationContext
                 Bg.run("bt-pair-only") {
+                    fun mayDisconnect(): Boolean {
+                        val target = TargetDevicePrefs.get(app)
+                        val matches = target != null && TargetDevicePrefs.matches(target, address)
+                        val bonded = try {
+                            device.bondState == BluetoothDevice.BOND_BONDED
+                        } catch (_: SecurityException) {
+                            false
+                        }
+                        return SessionController.allowsPostBondDisconnect(
+                            context = app,
+                            targetMatches = matches,
+                            isBonded = bonded,
+                            interrupted = Thread.currentThread().isInterrupted,
+                        )
+                    }
                     repeat(2) { attempt ->
-                        val dropped = BtProfiles.disconnect(app, device)
-                        if (dropped.isNotEmpty()) {
-                            log(
-                                "BT-PAIR: 已断开配对后自动建立的 ${dropped.joinToString("/")} 连接" +
-                                    "（保持仅配对，避免车机拒绝 CarPlay）",
-                            )
+                        if (!mayDisconnect()) {
+                            log("BT-PAIR: 保留系统蓝牙或配对目标已变化，跳过配对后断开")
+                            return@run
+                        }
+                        val before = BtProfiles.disconnect(app, device, isCurrent = ::mayDisconnect) { action ->
+                            if (!mayDisconnect()) false else { action(); true }
+                        }
+                        if (before.isNotEmpty() && mayDisconnect()) {
+                            val result = BtProfiles.disconnectResult(app, address, before)
+                            log("BT-PAIR: 配对后系统蓝牙断开操作：$result")
                         }
                         if (attempt == 0) {
                             try {
