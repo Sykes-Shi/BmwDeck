@@ -214,6 +214,7 @@ class Iap2BluetoothClient(
             } ?: return
         var lastFailureLogAt = 0L
         val probedTargets = mutableSetOf<String>()
+        val snapshottedTargets = mutableSetOf<String>()
         val backoff = BluetoothConnectionDiagnostics.ProbeBackoff()
         while (running && generation.get() == myGeneration) {
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
@@ -236,7 +237,12 @@ class Iap2BluetoothClient(
             for (device in candidates) {
                 if (!running || generation.get() != myGeneration) return
                 runCatching { adapter.cancelDiscovery() }
-                val explicit = targetProvider() != null
+                val selectedTarget = targetProvider()
+                val explicit = selectedTarget != null
+                if (selectedTarget != null && TargetDevicePrefs.matches(selectedTarget, device.address) &&
+                    snapshottedTargets.add(device.address)) {
+                    logSelectedCachedServices(device)
+                }
                 if (!explicit && !backoff.shouldProbe(device.address, android.os.SystemClock.elapsedRealtime())) continue
                 val probe = !explicit || (probeSelected && probedTargets.add(device.address))
                 if (probe) {
@@ -311,6 +317,19 @@ class Iap2BluetoothClient(
         log("BT-C: 客户端已停止")
     }
 
+    /** Only inspect the system cache once per selected device; this performs no SDP request. */
+    @SuppressLint("MissingPermission")
+    private fun logSelectedCachedServices(device: BluetoothDevice) {
+        val state = try {
+            BluetoothConnectionDiagnostics.cachedServices(device.uuids?.map { it.uuid }, ACCESSORY_IAP2_UUID)
+        } catch (_: SecurityException) {
+            "count=unknown iap2=unknown status=permission_denied"
+        } catch (_: RuntimeException) {
+            "count=unknown iap2=unknown status=unavailable"
+        }
+        log("BT-C: SDP cached $state（系统缓存可能不是最新）")
+    }
+
     /**
      * 候选设备：优先 SDP 缓存里带配件端 UUID 的已配对设备；
      * 缓存缺失时退化为全部已配对设备（connect 时的 SDP 查询会自行过滤）。
@@ -351,8 +370,11 @@ class Iap2BluetoothClient(
     @SuppressLint("MissingPermission")
     private fun tryConnect(device: BluetoothDevice, myGeneration: Long, allowed: () -> Boolean): BluetoothSocket? {
         fun failed(stage: String, startedAt: Long, error: Exception) {
+            val code = BluetoothConnectionDiagnostics.socketErrorCode(error)
             log("BT-C: RFCOMM stage=$stage result=failed type=${error.javaClass.simpleName} " +
                 "category=${BluetoothConnectionDiagnostics.errorCategory(error)} " +
+                "socketCode=${code ?: "unavailable"} " +
+                "socketCodeName=${BluetoothConnectionDiagnostics.socketErrorCodeLabel(code)} " +
                 "elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}")
         }
         val createAt = android.os.SystemClock.elapsedRealtime()

@@ -1,5 +1,8 @@
 package io.github.shaonialife.cardeck.bt
 
+import android.bluetooth.BluetoothSocketException
+import android.os.Build
+import androidx.annotation.RequiresApi
 import java.util.UUID
 
 /** A failed or incomplete SDP query is never evidence that a service is absent. */
@@ -48,6 +51,54 @@ internal object BluetoothConnectionDiagnostics {
         else -> "确认已断开"
     }
 
+    /** UUID list comes from BluetoothDevice.getUuids(), which is a possibly stale cache. */
+    fun cachedServices(uuids: List<UUID>?, expected: UUID): String =
+        if (uuids == null) "count=unknown iap2=unknown" else
+            "count=${uuids.size} iap2=${expected in uuids}"
+
+    /** Read only a platform-defined integer, never log the exception message. */
+    fun socketErrorCode(error: Throwable, sdkInt: Int = Build.VERSION.SDK_INT): Int? {
+        // The runtime guard is deliberately explicit: the injected value alone cannot protect
+        // Android 12/13 from resolving the API-34 BluetoothSocketException type.
+        if (Build.VERSION.SDK_INT < 34) return null
+        if (sdkInt < 34) return null
+        return try {
+            SocketErrorApi34.read(error)
+        } catch (_: Exception) {
+            null
+        } catch (_: LinkageError) {
+            null
+        }
+    }
+
+    /** Fixed labels mirror platform codes; a generic failure is not a diagnosis. */
+    fun socketErrorCodeLabel(code: Int?): String = when (code) {
+        null -> "unavailable"
+        0 -> "unspecified"
+        1 -> "l2cap_unknown"
+        2 -> "l2cap_acl_failure"
+        3 -> "l2cap_client_security_failure"
+        4 -> "l2cap_insufficient_authentication"
+        5 -> "l2cap_insufficient_authorization"
+        6 -> "l2cap_insufficient_encryption_key_size"
+        7 -> "l2cap_insufficient_encryption"
+        8 -> "l2cap_invalid_source_cid"
+        9 -> "l2cap_source_cid_already_allocated"
+        10 -> "l2cap_unacceptable_parameters"
+        11 -> "l2cap_invalid_parameters"
+        12 -> "l2cap_no_resources"
+        13 -> "l2cap_no_psm_available"
+        14 -> "l2cap_timeout"
+        15 -> "bluetooth_off"
+        16 -> "socket_manager_failure"
+        17 -> "socket_closed"
+        18 -> "generic_socket_connection_failure"
+        19 -> "null_device"
+        20 -> "rpc_failure"
+        21 -> "unix_file_socket_creation_failure"
+        else -> "unrecognized"
+    }
+
     /** Never emit platform exception messages, which can contain identifiers. */
     fun errorCategory(error: Throwable): String {
         if (error is SecurityException) return "permission"
@@ -60,4 +111,10 @@ internal object BluetoothConnectionDiagnostics {
             else -> "other"
         }
     }
+}
+
+/** Isolated to avoid resolving API-34 types on Android 12 and 13. */
+@RequiresApi(34)
+private object SocketErrorApi34 {
+    fun read(error: Throwable): Int? = (error as? BluetoothSocketException)?.errorCode
 }

@@ -12,6 +12,23 @@ class BluetoothConnectionDiagnosticsTest {
     private val other = UUID.fromString("00000000-deca-fade-deca-deafdecacafe")
     private val outcomes = BluetoothConnectionDiagnostics.SdpOutcome.entries
 
+    @Test fun cachedServicesPreserveUnknownAndOnlyExposeCountAndPresence() {
+        assertEquals("count=unknown iap2=unknown", BluetoothConnectionDiagnostics.cachedServices(null, expected))
+        assertEquals("count=0 iap2=false", BluetoothConnectionDiagnostics.cachedServices(emptyList(), expected))
+        assertEquals("count=2 iap2=true", BluetoothConnectionDiagnostics.cachedServices(listOf(expected, other), expected))
+        assertEquals("count=1 iap2=false", BluetoothConnectionDiagnostics.cachedServices(listOf(other), expected))
+    }
+
+    @Test fun platformSocketCodeHasVersionFallbackAndGenericFailureIsNotOverinterpreted() {
+        assertEquals(null, BluetoothConnectionDiagnostics.socketErrorCode(IOException("private"), sdkInt = 33))
+        assertEquals(null, BluetoothConnectionDiagnostics.socketErrorCode(IOException("private"), sdkInt = 34))
+        assertEquals("unavailable", BluetoothConnectionDiagnostics.socketErrorCodeLabel(null))
+        assertEquals("generic_socket_connection_failure", BluetoothConnectionDiagnostics.socketErrorCodeLabel(18))
+        assertEquals("socket_manager_failure", BluetoothConnectionDiagnostics.socketErrorCodeLabel(16))
+        assertEquals("l2cap_insufficient_authentication", BluetoothConnectionDiagnostics.socketErrorCodeLabel(4))
+        assertEquals("unrecognized", BluetoothConnectionDiagnostics.socketErrorCodeLabel(9999))
+    }
+
     @Test fun distinguishesPresentAbsentAndUnavailable() {
         assertEquals(BluetoothConnectionDiagnostics.SdpOutcome.PRESENT, BluetoothConnectionDiagnostics.fromUuids(listOf(other, expected), expected))
         assertEquals(BluetoothConnectionDiagnostics.SdpOutcome.NOT_FOUND, BluetoothConnectionDiagnostics.fromUuids(listOf(other), expected))
