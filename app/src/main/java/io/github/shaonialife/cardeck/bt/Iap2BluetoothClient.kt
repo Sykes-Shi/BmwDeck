@@ -90,10 +90,29 @@ class Iap2BluetoothClient(
 
     /** Probe the selected device only when requested; failures are never cached as absence. */
     @SuppressLint("MissingPermission")
-    private fun awaitIap2Service(device: BluetoothDevice, useCached: Boolean): BluetoothConnectionDiagnostics.SdpOutcome {
+    private fun awaitIap2Service(
+        device: BluetoothDevice,
+        useCached: Boolean,
+        selectedProbe: Int? = null,
+        stillRelevant: () -> Boolean = { true },
+    ): BluetoothConnectionDiagnostics.SdpOutcome {
         val startedAt = android.os.SystemClock.elapsedRealtime()
+        val requestedTransport = if (selectedProbe != null) {
+            BluetoothConnectionDiagnostics.selectedProbeTransport(android.os.Build.VERSION.SDK_INT, selectedProbe)
+        } else BluetoothConnectionDiagnostics.SdpTransport.LEGACY
+        var startState = "NOT_ATTEMPTED"
         fun report(outcome: BluetoothConnectionDiagnostics.SdpOutcome): BluetoothConnectionDiagnostics.SdpOutcome {
-            log("BT-C: SDP status=${outcome.name} elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}")
+            if (!stillRelevant()) return BluetoothConnectionDiagnostics.SdpOutcome.CANCELLED
+            val details = if (selectedProbe != null) {
+                val foundInCallback = when (outcome) {
+                    BluetoothConnectionDiagnostics.SdpOutcome.PRESENT -> "yes"
+                    BluetoothConnectionDiagnostics.SdpOutcome.NOT_FOUND -> "no"
+                    else -> "unknown"
+                }
+                " probe=$selectedProbe requestedTransport=${requestedTransport.name} start=$startState" +
+                    " serviceInCallback=$foundInCallback callbackMayBeCached=true callbackTransport=unconfirmed"
+            } else ""
+            log("BT-C: SDP status=${outcome.name} elapsedMs=${android.os.SystemClock.elapsedRealtime() - startedAt}$details")
             return outcome
         }
         val address = try { device.address } catch (_: SecurityException) {
@@ -121,11 +140,11 @@ class Iap2BluetoothClient(
                     @Suppress("DEPRECATION")
                     val values = intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID)
                         ?.mapNotNull { (it as? android.os.ParcelUuid)?.uuid }
-                    outcome.set(BluetoothConnectionDiagnostics.fromUuids(values, ACCESSORY_IAP2_UUID))
+                    outcome.compareAndSet(null, BluetoothConnectionDiagnostics.fromUuids(values, ACCESSORY_IAP2_UUID))
                 } catch (_: SecurityException) {
-                    outcome.set(BluetoothConnectionDiagnostics.SdpOutcome.PERMISSION_DENIED)
+                    outcome.compareAndSet(null, BluetoothConnectionDiagnostics.SdpOutcome.PERMISSION_DENIED)
                 } catch (_: RuntimeException) {
-                    outcome.set(BluetoothConnectionDiagnostics.SdpOutcome.UNAVAILABLE)
+                    outcome.compareAndSet(null, BluetoothConnectionDiagnostics.SdpOutcome.UNAVAILABLE)
                 } finally {
                     if (outcome.get() != null) latch.countDown()
                 }
@@ -133,15 +152,34 @@ class Iap2BluetoothClient(
         }
         var registered = false
         try {
+            if (!stillRelevant()) return BluetoothConnectionDiagnostics.SdpOutcome.CANCELLED
             ContextCompat.registerReceiver(context, receiver,
                 android.content.IntentFilter(BluetoothDevice.ACTION_UUID), ContextCompat.RECEIVER_EXPORTED)
             registered = true
-            if (!device.fetchUuidsWithSdp()) return report(BluetoothConnectionDiagnostics.SdpOutcome.UNAVAILABLE)
+            if (!stillRelevant()) return BluetoothConnectionDiagnostics.SdpOutcome.CANCELLED
+            if (requestedTransport == BluetoothConnectionDiagnostics.SdpTransport.BREDR) {
+                val start = BluetoothConnectionDiagnostics.requestBrEdr(device, BluetoothDevice.TRANSPORT_BREDR)
+                startState = if (start == BluetoothConnectionDiagnostics.SdpStart.INVOCATION_FAILED) {
+                    "INVOCATION_FAILED_STATE_UNKNOWN"
+                } else start.name
+                when (start) {
+                    BluetoothConnectionDiagnostics.SdpStart.PERMISSION_DENIED ->
+                        return report(BluetoothConnectionDiagnostics.SdpOutcome.PERMISSION_DENIED)
+                    BluetoothConnectionDiagnostics.SdpStart.METHOD_MISSING,
+                    BluetoothConnectionDiagnostics.SdpStart.NOT_STARTED ->
+                        return report(BluetoothConnectionDiagnostics.SdpOutcome.UNAVAILABLE)
+                    else -> Unit // An ambiguous invocation may already have initiated a request; never retry here.
+                }
+            } else {
+                val started = device.fetchUuidsWithSdp()
+                startState = if (started) "STARTED" else "NOT_STARTED"
+                if (!started) return report(BluetoothConnectionDiagnostics.SdpOutcome.UNAVAILABLE)
+            }
             if (!latch.await(SDP_PROBE_TIMEOUT_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                 return report(BluetoothConnectionDiagnostics.SdpOutcome.TIMEOUT)
             }
             val result = outcome.get() ?: BluetoothConnectionDiagnostics.SdpOutcome.UNAVAILABLE
-            if (BluetoothConnectionDiagnostics.shouldCache(result)) iap2ServiceCache[address] = true
+            if (stillRelevant() && BluetoothConnectionDiagnostics.shouldCache(result)) iap2ServiceCache[address] = true
             return report(result)
         } catch (_: SecurityException) {
             return report(BluetoothConnectionDiagnostics.SdpOutcome.PERMISSION_DENIED)
@@ -213,7 +251,7 @@ class Iap2BluetoothClient(
                 null
             } ?: return
         var lastFailureLogAt = 0L
-        val probedTargets = mutableSetOf<String>()
+        val selectedSchedule = BluetoothConnectionDiagnostics.SelectedSdpSchedule()
         val backoff = BluetoothConnectionDiagnostics.ProbeBackoff()
         while (running && generation.get() == myGeneration) {
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
@@ -236,12 +274,29 @@ class Iap2BluetoothClient(
             for (device in candidates) {
                 if (!running || generation.get() != myGeneration) return
                 runCatching { adapter.cancelDiscovery() }
-                val explicit = targetProvider() != null
+                val selected = targetProvider()
+                val explicit = selected != null
+                if (selected != null && !TargetDevicePrefs.matches(selected, device.address)) continue
+                if (!explicit || !probeSelected) selectedSchedule.clear()
                 if (!explicit && !backoff.shouldProbe(device.address, android.os.SystemClock.elapsedRealtime())) continue
-                val probe = !explicit || (probeSelected && probedTargets.add(device.address))
+                val probeNumber = if (explicit && probeSelected) {
+                    selectedSchedule.next(device.address, android.os.SystemClock.elapsedRealtime(), enabled = true, running = running)
+                } else null
+                val probe = !explicit || probeNumber != null
                 if (probe) {
-                    val outcome = awaitIap2Service(device, useCached = !explicit)
-                    if (!running || generation.get() != myGeneration || outcome == BluetoothConnectionDiagnostics.SdpOutcome.CANCELLED) return
+                    val outcome = awaitIap2Service(device, useCached = !explicit, selectedProbe = probeNumber) {
+                        if (!explicit) true else {
+                            val current = targetProvider()
+                            running && generation.get() == myGeneration && !BtSessionGate.inboundActive &&
+                                !BtSessionGate.sessionActive && current != null &&
+                                TargetDevicePrefs.matches(current, device.address)
+                        }
+                    }
+                    if (!running || generation.get() != myGeneration) return
+                    if (outcome == BluetoothConnectionDiagnostics.SdpOutcome.CANCELLED) {
+                        if (explicit) continue else return
+                    }
+                    if (probeNumber != null) selectedSchedule.record(device.address, outcome)
                     if (!explicit) backoff.note(device.address, android.os.SystemClock.elapsedRealtime(), outcome)
                     if (!BluetoothConnectionDiagnostics.canAttempt(explicit, outcome)) {
                         if (skippedNoService.add(device.address)) log("BT-C: 候选设备的 iAP2 服务未确认，跳过本次连接")
