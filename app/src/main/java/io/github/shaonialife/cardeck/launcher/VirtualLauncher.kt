@@ -16,13 +16,15 @@ import io.github.shaonialife.cardeck.launcher.settings.MapDisplayPrefs
 import io.github.shaonialife.cardeck.launcher.settings.MapUiScale
 import io.github.shaonialife.cardeck.launcher.settings.PhoneNavigationPrefs
 import io.github.shaonialife.cardeck.launcher.settings.PhoneNavigationSessionPolicy
+import io.github.shaonialife.cardeck.media.MediaSessionsState
+import io.github.shaonialife.cardeck.media.TargetedMediaControls
 import io.github.shaonialife.cardeck.media.NotificationAccess
 import io.github.shaonialife.cardeck.net.ProjectionAppMobileData
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.DASH_GAP_PX
 import io.github.shaonialife.cardeck.render.DASH_HANDLE_TOUCH_PX
 import io.github.shaonialife.cardeck.render.DualDisplayComposer
-import io.github.shaonialife.cardeck.render.KidsVideoBackdrop
+import io.github.shaonialife.cardeck.render.VideoBarControls
 import io.github.shaonialife.cardeck.render.OverlayCard
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
 import io.github.shaonialife.cardeck.shizuku.Shell
@@ -2040,10 +2042,10 @@ object VirtualLauncher {
             }
             // 合成器切到目标屏（超采样屏等其出帧再切；原生屏即时切换）
             composer?.requestActiveApp(targetDisplay == appHiDisplayId)
-            if (!dockAtBottom && component.packageName == KidsVideoBackdrop.PACKAGE) {
+            if (component.packageName in VideoBarControls.packages) {
                 composer?.let { target ->
-                    if (kidsVideoGeneration.getAndSet(session.generation) != session.generation) {
-                        monitorKidsVideo(session.generation, target)
+                    if (videoMonitorGeneration.getAndSet(session.generation) != session.generation) {
+                        monitorVideo(session.generation, target)
                     }
                 }
             }
@@ -2194,46 +2196,95 @@ object VirtualLauncher {
             }
     }
 
-    private val kidsVideoGeneration = java.util.concurrent.atomic.AtomicLong(-1)
+    private val videoMonitorGeneration = java.util.concurrent.atomic.AtomicLong(-1)
 
-    /** Follow the actual foreground once this app has opened, including return via Back or Recents. */
-    private fun monitorKidsVideo(generation: Long, target: DualDisplayComposer) = Bg.run("kids-video-backdrop") {
-        val pkg = KidsVideoBackdrop.PACKAGE
-        val motion = KidsVideoBackdrop.Motion()
-        logSink?.invoke("VIDEO: 小小优趣播放器适配已就绪")
-        var lastApplied = false
-        fun live() = isCurrentSession(generation) && composer === target
+    private fun videoForeground(generation: Long, revision: Long, display: Int, hi: Boolean): VideoBarControls.Target? {
+        if (display <= 0 || dashboardMode || mapFullscreen) return null
+        val top = Shell.exec(
+            "dumpsys -t 1 activity activities | grep -E '^[[:space:]]*(Display[ :]|topResumedActivity|mResumedActivity|Resumed:)'",
+            timeoutMs = 1500,
+        )
+        if (!top.ok) return null
+        for (pkg in VideoBarControls.packages) {
+            val activity = mapPackagePlacement(display, top.output, pkg).activity ?: continue
+            return VideoBarControls.Target(generation, revision, display, hi, activity.component, activity.taskId)
+        }
+        return null
+    }
+
+    /** SurfaceView evidence must name this foreground activity, including on single-activity players. */
+    private fun hasVideoSurface(target: VideoBarControls.Target): Boolean {
+        val name = target.component.substringAfter('/').substringAfterLast('.')
+        if (name.contains("Player", true) || name.contains("VideoPlay", true) || name.contains("PlayVideo", true)) return true
+        val pkg = shellArgument(target.pkg + "/")
+        val activity = shellArgument(name)
+        return Shell.exec(
+            "dumpsys -t 1 SurfaceFlinger --list | grep -F $pkg | grep -F $activity | grep -Em1 'SurfaceView|VideoSurface'",
+            timeoutMs = 1500,
+        ).let { it.ok && it.output.isNotBlank() }
+    }
+
+    private fun monitorVideo(generation: Long, renderer: DualDisplayComposer) = Bg.run("video-bar-controls") {
+        val motion = VideoBarControls.Motion()
+        var previous: VideoBarControls.Target? = null
+        var visibleFor: String? = null
+        fun live() = isCurrentSession(generation) && composer === renderer
         while (live()) {
-            var playerVisible = false
-            val revision = presentationRevision()
-            val hi = target.isActiveAppHi()
-            val display = if (hi) appHiDisplayId else appDisplayId
+            var candidate: VideoBarControls.Target? = null
             val applied = runCatching {
-                if (display <= 0 || dashboardMode || mapFullscreen) return@runCatching false
-                val top = Shell.exec(
-                    "dumpsys -t 1 activity activities | grep -E '^[[:space:]]*(Display[ :]|topResumedActivity|mResumedActivity|Resumed:)'",
-                    timeoutMs = 1500,
-                )
-                if (!top.ok) return@runCatching false
-                val activity = mapPackagePlacement(display, top.output, pkg).activity ?: return@runCatching false
-                val name = activity.component.substringAfter('/').substringAfterLast('.')
-                val playback = io.github.shaonialife.cardeck.media.MediaSessionsState.forPackage(pkg)?.playing == true
-                playerVisible = playback || name.contains("Player", true) || name.contains("VideoPlay", true) ||
-                    Shell.exec("dumpsys -t 1 SurfaceFlinger --list | grep -F '$pkg/' | grep -Em1 'SurfaceView|VideoSurface'", 1500).let {
-                        it.ok && it.output.isNotBlank()
-                    }
-                if (!playerVisible || !live() || revision != presentationRevision() || hi != target.isActiveAppHi()) {
+                val hi = renderer.isActiveAppHi()
+                val display = if (hi) appHiDisplayId else appDisplayId
+                val current = videoForeground(generation, presentationRevision(), display, hi) ?: return@runCatching false
+                if (current != previous) motion.reset()
+                candidate = current
+                val media = MediaSessionsState.forPackage(current.pkg)
+                val playing = media?.reportedPlaying
+                if (playing == false || (playing == null && !hasVideoSurface(current))) {
+                    motion.reset()
                     return@runCatching false
                 }
-                target.sampleKidsVideo(hi, revision, playback, motion)
-            }.getOrDefault(false)
-            if (!applied) target.clearKidsVideoBackdrop()
-            if (!playerVisible) motion.reset()
-            if (applied != lastApplied && live()) {
-                logSink?.invoke("VIDEO: 小小优趣画面两翼" + if (applied) "开启" else "恢复原样")
-                lastApplied = applied
+                if (!live() || presentationRevision() != current.revision || hi != renderer.isActiveAppHi()) return@runCatching false
+                val canPause = MediaSessionsState.accessGranted && TargetedMediaControls.supported(media, TargetedMediaControls.Command.PAUSE)
+                renderer.sampleVideoControls(current, playing, canPause, motion)
+            }.getOrElse { motion.reset(); false }
+            if (!applied) renderer.clearVideoControls()
+            previous = candidate
+            val visible = candidate?.pkg?.takeIf { applied }
+            if (visible != visibleFor && live()) {
+                logSink?.invoke(if (visible == null) "VIDEO: 收起黑边按键" else "VIDEO: $visible 播放黑边按键已显示")
+                visibleFor = visible
             }
-            Thread.sleep(if (playerVisible) 700L else 2500L)
+            Thread.sleep(if (candidate != null) 450L else 2000L)
+        }
+    }
+
+    internal fun videoButtonAt(x: Float, y: Float, verifyDown: Boolean = false): VideoBarControls.Hit? {
+        val renderer = composer ?: return null
+        val hit = renderer.videoButtonAt(x, y) ?: return null
+        if (!verifyDown) return hit
+        // Only a potential button DOWN pays for a fresh frame. The HID reader is off the UI thread.
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return null
+        return hit.takeIf { runCatching { renderer.videoButtonStillVisible(it, 65L) }.getOrDefault(false) }
+    }
+
+    internal fun tapVideoButton(hit: VideoBarControls.Hit) {
+        val renderer = composer ?: return
+        val target = hit.target
+        val ctx = appContextRef ?: return
+        val media = MediaSessionsState.forPackage(target.pkg)
+        fun live() = composer === renderer && isCurrentSession(target.generation) && presentationRevision() == target.revision &&
+            renderer.isActiveAppHi() == target.hi && activeAppDisplayId() == target.display && !dashboardMode && !mapFullscreen
+        Bg.run("video-button") {
+            if (!live() || videoForeground(target.generation, target.revision, target.display, target.hi) != target) return@run
+            if (MediaSessionsState.forPackage(target.pkg)?.reportedPlaying == false ||
+                !runCatching { renderer.videoButtonStillVisible(hit) }.getOrDefault(false) || !live()
+            ) return@run
+            when (hit.button.action) {
+                VideoBarControls.Action.BACK -> CarInputClient.service?.sendNavigationKey(target.display, android.view.KeyEvent.KEYCODE_BACK, false)
+                VideoBarControls.Action.DESKTOP -> openControllerAppList { composer === renderer && isCurrentSession(target.generation) }
+                VideoBarControls.Action.PAUSE -> if (media != null) TargetedMediaControls.send(ctx, media, TargetedMediaControls.Command.PAUSE)
+            }
+            renderer.clearVideoControls()
         }
     }
 

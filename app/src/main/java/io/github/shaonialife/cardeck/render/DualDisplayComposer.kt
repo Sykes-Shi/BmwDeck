@@ -128,40 +128,83 @@ class DualDisplayComposer(
     @Volatile
     private var activeAppHi = false
 
-    private data class VideoBackdrop(
-        val hi: Boolean, val revision: Long, val expires: Long, val bands: KidsVideoBackdrop.Bands,
+    private data class VideoControls(
+        val target: VideoBarControls.Target,
+        val buttons: List<VideoBarControls.Button>,
+        val expires: Long,
     )
-    @Volatile private var videoBackdrop: VideoBackdrop? = null
 
-    internal fun clearKidsVideoBackdrop() {
-        if (videoBackdrop != null) {
-            videoBackdrop = null
-            overlayDirty = true
-        }
+    @Volatile private var videoControls: VideoControls? = null
+    @Volatile private var drawnControls: VideoControls? = null
+
+    internal fun clearVideoControls() {
+        videoControls = null
+        drawnControls = null
     }
 
-    /** Worker only. Sample the original app surface before the backdrop is composited. */
-    internal fun sampleKidsVideo(hi: Boolean, revision: Long, playing: Boolean, motion: KidsVideoBackdrop.Motion): Boolean {
-        val input = (if (hi) appHi else appInput) ?: return false
-        val probe = Bitmap.createBitmap(KidsVideoBackdrop.WIDTH, KidsVideoBackdrop.HEIGHT, Bitmap.Config.ARGB_8888)
-        SurfaceFrameCopy.copyInto(input.surface, probe, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(700))
-        val bands = try {
-            val colors = IntArray(probe.width * probe.height)
-            probe.getPixels(colors, 0, probe.width, 0, 0, probe.width, probe.height)
-            val detected = KidsVideoBackdrop.detect(colors, input.geometry.width.toFloat() / input.geometry.height)
-            if (detected == null) motion.reset()
-            detected?.takeIf { motion.isMoving(colors, android.os.SystemClock.uptimeMillis()) || playing }
+    private fun matchesVideoTarget(target: VideoBarControls.Target) =
+        running.get() && activeAppHi == target.hi && pendingTargetHi == null &&
+            tileLayout == TileLayout.HIDDEN && !VirtualLauncher.dashboardMode && !VirtualLauncher.mapFullscreen &&
+            VirtualLauncher.isCurrentSession(target.generation) && VirtualLauncher.presentationRevision() == target.revision
+
+    private fun currentVideoControls() = videoControls?.takeIf {
+        matchesVideoTarget(it.target) && overlayCard == null && shortcutNotice == null &&
+            android.os.SystemClock.uptimeMillis() < it.expires
+    }
+
+    internal fun videoButtonAt(x: Float, y: Float): VideoBarControls.Hit? {
+        val shown = drawnControls ?: return null
+        val current = currentVideoControls() ?: return null
+        if (shown.target != current.target || shown.buttons != current.buttons) return null
+        return shown.buttons.firstOrNull { it.contains(x, y) }?.let { VideoBarControls.Hit(shown.target, it) }
+    }
+
+    /** Worker only. PixelCopy owns the destination until a successful return. */
+    private fun readVideoBars(hi: Boolean, timeoutMs: Long = 450L): Pair<IntArray, VideoBarControls.Bars>? {
+        val input = (if (hi) appHi else appInput) ?: return null
+        val probe = Bitmap.createBitmap(VideoBarControls.WIDTH, VideoBarControls.HEIGHT, Bitmap.Config.ARGB_8888)
+        SurfaceFrameCopy.copyInto(input.surface, probe, java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs))
+        try {
+            val pixels = IntArray(probe.width * probe.height)
+            probe.getPixels(pixels, 0, probe.width, 0, 0, probe.width, probe.height)
+            val bars = VideoBarControls.detect(pixels, input.geometry.width.toFloat() / input.geometry.height)
+            return bars?.let { pixels to it }
         } finally {
             probe.recycle()
         }
-        if (bands == null || !running.get() || activeAppHi != hi || VirtualLauncher.presentationRevision() != revision) {
-            clearKidsVideoBackdrop()
+    }
+
+    internal fun sampleVideoControls(
+        target: VideoBarControls.Target, playing: Boolean?, canPause: Boolean, motion: VideoBarControls.Motion,
+    ): Boolean {
+        val frame = readVideoBars(target.hi)
+        if (frame == null) {
+            motion.reset()
             return false
         }
-        videoBackdrop = VideoBackdrop(hi, revision, android.os.SystemClock.uptimeMillis() + 1800L, bands)
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!motion.playing(frame.first, frame.second, now, playing) || !matchesVideoTarget(target)) return false
+        val buttons = VideoBarControls.buttons(frame.second, appLeft, outWidth, projectedAppHeight, canPause)
+        if (buttons.isEmpty()) return false
+        videoControls = VideoControls(target, buttons, now + 1500L)
         overlayDirty = true
         return true
     }
+
+    /** Verify the original picture one last time before a queued button tap executes. */
+    internal fun videoButtonStillVisible(hit: VideoBarControls.Hit) = videoButtonStillVisible(hit, 450L)
+
+    internal fun videoButtonStillVisible(hit: VideoBarControls.Hit, timeoutMs: Long): Boolean {
+        val current = currentVideoControls() ?: return false
+        if (current.target != hit.target || hit.button !in current.buttons) return false
+        val bars = readVideoBars(hit.target.hi, timeoutMs)?.second ?: return false
+        val canPause = current.buttons.any { it.action == VideoBarControls.Action.PAUSE }
+        return hit.button in VideoBarControls.buttons(bars, appLeft, outWidth, projectedAppHeight, canPause) &&
+            currentVideoControls()?.target == hit.target
+    }
+
+    @Volatile private var appLeft = 0
+    @Volatile private var projectedAppHeight = 0
 
     /** 待切换的目标屏（true=超采样屏；null=无待切换）；切屏等目标出帧，避免闪黑/闪旧帧。 */
     @Volatile
@@ -225,6 +268,8 @@ class DualDisplayComposer(
         mapHeightPx: Int = 0,
     ) {
         if (running.getAndSet(true)) return
+        appLeft = if (dockAtBottom) 0 else dockWidthPx
+        projectedAppHeight = if (dockAtBottom) outHeight - dockHeightPx else outHeight
         hasHiInput = appHiWidthPx > 0 && appHiHeightPx > 0
         hasMapInput = mapWidthPx > 0 && mapHeightPx > 0
         val ready = CountDownLatch(1)
@@ -315,6 +360,7 @@ class DualDisplayComposer(
 
     fun stop() {
         if (!running.getAndSet(false)) return
+        clearVideoControls()
         glThread?.interrupt()
         glThread = null
     }
@@ -431,9 +477,6 @@ class DualDisplayComposer(
         val uClipEnabled = GLES20.glGetUniformLocation(program, "uClipEnabled")
         val uClipRect = GLES20.glGetUniformLocation(program, "uClipRect")
         val uClipRadius = GLES20.glGetUniformLocation(program, "uClipRadius")
-        val uWingBounds = GLES20.glGetUniformLocation(program, "uWingBounds")
-        val uWingLeft = GLES20.glGetUniformLocation(program, "uWingLeft")
-        val uWingRight = GLES20.glGetUniformLocation(program, "uWingRight")
         GLES20.glUniform1i(uTexture, 0)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
 
@@ -446,6 +489,29 @@ class DualDisplayComposer(
         val ouSTMatrix = GLES20.glGetUniformLocation(overlayProgram, "uSTMatrix")
         val ouTexture = GLES20.glGetUniformLocation(overlayProgram, "uTexture")
 
+        val ouSource = GLES20.glGetUniformLocation(overlayProgram, "uSource")
+        val ouVideo = GLES20.glGetUniformLocation(overlayProgram, "uVideo")
+        val ouRect = GLES20.glGetUniformLocation(overlayProgram, "uRect")
+        val ouSourceMatrix = GLES20.glGetUniformLocation(overlayProgram, "uSourceMatrix")
+        val buttonTextures = mutableMapOf<VideoBarControls.Action, Int>()
+
+        fun uploadBitmap(texture: Int, bitmap: Bitmap): Int {
+            var id = texture
+            if (id == 0) {
+                val names = IntArray(1)
+                GLES20.glGenTextures(1, names, 0)
+                id = names[0]
+            }
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, id)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
+            android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+            return id
+        }
+
         /** 上传/更新叠加卡片纹理（仅 GL 线程；卡片引用变化时才重新上传）。 */
         fun syncOverlayTexture(): OverlayCard? {
             val card =
@@ -454,18 +520,7 @@ class DualDisplayComposer(
                     return null
                 }
             if (card === uploadedOverlay && overlayTexture != 0) return card
-            if (overlayTexture == 0) {
-                val tex = IntArray(1)
-                GLES20.glGenTextures(1, tex, 0)
-                overlayTexture = tex[0]
-            }
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTexture)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1)
-            android.opengl.GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, card.bitmap, 0)
+            overlayTexture = uploadBitmap(overlayTexture, card.bitmap)
             uploadedOverlay = card
             return card
         }
@@ -475,16 +530,29 @@ class DualDisplayComposer(
          * 这里转成 GL 底部原点；Bitmap 首行在顶部，故纹理 v 轴与顶点方向相反。
          */
         fun drawOverlay(
-            card: OverlayCard,
+            texture: Int,
             left: Float,
             top: Float,
             right: Float,
             bottom: Float,
+            videoInput: Input? = null,
         ) {
             GLES20.glUseProgram(overlayProgram)
             GLES20.glUniform1i(ouTexture, 0)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTexture)
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture)
+            GLES20.glUniform1i(ouSource, 1)
+            GLES20.glUniform1i(ouVideo, if (videoInput == null) 0 else 1)
+            if (videoInput != null) {
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, videoInput.texture)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                videoInput.surfaceTexture.getTransformMatrix(matrix)
+                GLES20.glUniformMatrix4fv(ouSourceMatrix, 1, false, matrix, 0)
+                val w = (outWidth - appLeft).toFloat()
+                GLES20.glUniform4f(ouRect, (left - appLeft) / w, 1f - top / projectedAppHeight,
+                    (right - appLeft) / w, 1f - bottom / projectedAppHeight)
+            }
             GLES20.glEnable(GLES20.GL_BLEND)
             GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
             GLES20.glUniformMatrix4fv(ouSTMatrix, 1, false, IDENTITY_ST, 0)
@@ -528,17 +596,7 @@ class DualDisplayComposer(
             u0: Float = 0f,
             u1: Float = 1f,
             cornerRadius: Float = 0f,
-            bands: KidsVideoBackdrop.Bands? = null,
         ) {
-            if (bands == null) {
-                GLES20.glUniform4f(uWingBounds, 0f, 0f, 0f, 0f)
-            } else {
-                fun color(location: Int, rgb: Int) = GLES20.glUniform3f(location,
-                    (rgb ushr 16 and 255) / 255f, (rgb ushr 8 and 255) / 255f, (rgb and 255) / 255f)
-                GLES20.glUniform4f(uWingBounds, x0, x0 + (x1 - x0) * bands.left, x0 + (x1 - x0) * bands.right, x1)
-                color(uWingLeft, bands.leftColor)
-                color(uWingRight, bands.rightColor)
-            }
             input.surfaceTexture.getTransformMatrix(matrix)
             GLES20.glUniformMatrix4fv(uSTMatrix, 1, false, matrix, 0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, input.texture)
@@ -683,13 +741,7 @@ class DualDisplayComposer(
                 }
             } else {
                 if (activeInput?.hasContent == true) {
-                    val backdrop = videoBackdrop
-                    val bands = backdrop?.takeIf {
-                        tileLayout == TileLayout.HIDDEN && it.hi == activeAppHi &&
-                            it.revision == VirtualLauncher.presentationRevision() &&
-                            android.os.SystemClock.uptimeMillis() < it.expires
-                    }?.bands
-                    drawInputUV(activeInput, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat(), bands = bands)
+                    drawInput(activeInput, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
                 }
                 // 地图层叠在应用区之上（HIDDEN 不画）：
                 //  FULLSCREEN=整个应用区；SPLIT=左半卡片区域。
@@ -728,8 +780,13 @@ class DualDisplayComposer(
                 if (dock.hasContent) drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
             }
             // 叠加卡片最后绘制（最上层，不受分支影响）：卡片坐标为输出画面坐标（顶部原点）
+            val video = currentVideoControls()?.takeIf { activeInput?.hasContent == true }
+            video?.buttons?.forEach { button ->
+                val texture = buttonTextures.getOrPut(button.action) { uploadBitmap(0, VideoButtonArt.bitmaps.getValue(button.action)) }
+                drawOverlay(texture, button.left, button.top, button.right, button.bottom, activeInput)
+            }
             syncOverlayTexture()?.let { card ->
-                drawOverlay(card, card.left, card.top, card.right, card.bottom)
+                drawOverlay(overlayTexture, card.left, card.top, card.right, card.bottom)
             }
             if (fullRedraw ||
                 overlayDirty ||
@@ -741,7 +798,7 @@ class DualDisplayComposer(
                 rotaryBrightnessProbe.onFrame(outWidth, outHeight, dockW, dockH, dockAtBottom) {
                     VirtualLauncher.logSink?.invoke(it)
                 }
-                EGL14.eglSwapBuffers(display, outputSurface)
+                if (EGL14.eglSwapBuffers(display, outputSurface)) drawnControls = video
             }
             overlayDirty = false
         }
@@ -785,6 +842,7 @@ class DualDisplayComposer(
             }
         } catch (_: InterruptedException) {
         } finally {
+            if (buttonTextures.isNotEmpty()) GLES20.glDeleteTextures(buttonTextures.size, buttonTextures.values.toIntArray(), 0)
             if (overlayTexture != 0) {
                 runCatching { GLES20.glDeleteTextures(1, intArrayOf(overlayTexture), 0) }
                 overlayTexture = 0
@@ -827,9 +885,6 @@ class DualDisplayComposer(
                 uniform int uClipEnabled;
                 uniform vec4 uClipRect;
                 uniform float uClipRadius;
-                uniform vec4 uWingBounds;
-                uniform vec3 uWingLeft;
-                uniform vec3 uWingRight;
                 void main() {
                     if (uClipEnabled == 1) {
                         vec2 p = gl_FragCoord.xy;
@@ -837,31 +892,34 @@ class DualDisplayComposer(
                         vec2 c = clamp(p, uClipRect.xy + half2, uClipRect.zw - half2);
                         if (distance(p, c) > uClipRadius) discard;
                     }
-                    vec4 original = texture2D(uTexture, vTexCoord);
-                    float x = gl_FragCoord.x;
-                    if (uWingBounds.w > 0.0 && (x < uWingBounds.y || x > uWingBounds.z)) {
-                        bool left = x < uWingBounds.y;
-                        float f = left ? (x-uWingBounds.x)/(uWingBounds.y-uWingBounds.x)
-                                       : (uWingBounds.w-x)/(uWingBounds.w-uWingBounds.z);
-                        float lumaMax = max(original.r, max(original.g, original.b));
-                        float black = 1.0 - smoothstep(0.01, 0.055, lumaMax);
-                        // A newly opened full-width menu can arrive before the next worker sample.
-                        vec3 edges = max(texture2D(uTexture, vec2(0.025,vTexCoord.y)).rgb,
-                                         texture2D(uTexture, vec2(0.975,vTexCoord.y)).rgb);
-                        black *= 1.0 - smoothstep(0.025, 0.06, max(edges.r, max(edges.g,edges.b)));
-                        original.rgb += (left ? uWingLeft : uWingRight) *
-                            (0.17 + 0.30 * smoothstep(0.0, 1.0, f)) *
-                            (1.0 - smoothstep(0.86, 1.0, f)) * black;
-                    }
-                    gl_FragColor = original;
+                    gl_FragColor = texture2D(uTexture, vTexCoord);
                 }
                 """.trimIndent()
             } else {
                 """
+                #extension GL_OES_EGL_image_external : require
                 precision mediump float;
                 varying vec2 vTexCoord;
                 uniform sampler2D uTexture;
+                uniform samplerExternalOES uSource;
+                uniform int uVideo;
+                uniform vec4 uRect;
+                uniform mat4 uSourceMatrix;
+                float sourceBrightness(vec2 at) {
+                    vec3 rgb = texture2D(uSource, (uSourceMatrix * vec4(at, 0.0, 1.0)).xy).rgb;
+                    return max(rgb.r, max(rgb.g, rgb.b));
+                }
                 void main() {
+                    if (uVideo == 1) {
+                        // Suppress full-black fades, and preserve new full-width pages between worker probes.
+                        float picture = max(sourceBrightness(vec2(0.34, 0.40)), max(sourceBrightness(vec2(0.50, 0.50)),
+                            sourceBrightness(vec2(0.66, 0.60))));
+                        float under = max(sourceBrightness(mix(uRect.xy, uRect.zw, vTexCoord)),
+                            max(sourceBrightness(mix(uRect.xy, uRect.zw, vec2(0.5))),
+                            max(sourceBrightness(mix(uRect.xy, uRect.zw, vec2(0.08))),
+                                sourceBrightness(mix(uRect.xy, uRect.zw, vec2(0.92))))));
+                        if (picture <= 0.06 || under > 0.06) discard;
+                    }
                     gl_FragColor = texture2D(uTexture, vTexCoord);
                 }
                 """.trimIndent()

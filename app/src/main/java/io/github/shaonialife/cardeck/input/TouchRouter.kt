@@ -8,6 +8,7 @@ import io.github.shaonialife.cardeck.launcher.VirtualLauncher
 import io.github.shaonialife.cardeck.launcher.resolveCardGesture
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
+import io.github.shaonialife.cardeck.render.VideoBarControls
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
 
 /**
@@ -39,6 +40,7 @@ object TouchRouter {
 
     /** 叠加卡片手势状态（卡片命中后独占触摸，不再注入应用）。 */
     private var overlayPressed = false
+    private val videoGesture = VideoBarControls.Gesture()
 
     /** 分屏把手粘性路由状态（命中把手条后整条触摸流固定路由应用屏）。 */
     private var splitHandlePressed = false
@@ -82,9 +84,18 @@ object TouchRouter {
         contact: Contact,
     ) {
         // 空闲槽占位（未按下且 0,0）忽略
-        if (!contact.down && contact.xPixels == 0 && contact.yPixels == 0) return
+        if (!contact.down && contact.xPixels == 0 && contact.yPixels == 0) {
+            if (videoGesture.owns(contact.slot)) {
+                val hit = videoGesture.heldButton()?.let { VirtualLauncher.videoButtonAt((it.left + it.right) / 2, (it.top + it.bottom) / 2) }
+                videoGesture.handle(contact.slot, false, hit, pressed, VirtualLauncher::tapVideoButton)
+            }
+            return
+        }
         val px = (contact.xPixels * coordScaleX).toInt().coerceAtLeast(0)
         val py = (contact.yPixels * coordScaleY).toInt().coerceAtLeast(0)
+        val videoHit = VirtualLauncher.videoButtonAt(px.toFloat(), py.toFloat(),
+            verifyDown = contact.down && !pressed && !overlayPressed && !videoGesture.active)
+        if (videoGesture.handle(contact.slot, contact.down, videoHit, pressed || overlayPressed, VirtualLauncher::tapVideoButton)) return
         if (contact.down && !pressed) {
             val inDock = if (VirtualLauncher.dockAtBottom) py >= VirtualLauncher.appHeightPx else px < VirtualLauncher.dockWidthPx
             CarControllerRouter.onTouchDown(inDock)
@@ -294,6 +305,7 @@ object TouchRouter {
     fun reset() {
         pressed = false
         pressedDisplay = -1
+        videoGesture.reset()
         overlayPressed = false
         splitHandlePressed = false
         cancelMapTileTap()

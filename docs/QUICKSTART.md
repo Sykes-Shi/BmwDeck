@@ -6,8 +6,8 @@
 
 - 普通体验请选择 **中控试用版**：用于中控屏的地图、音乐与应用界面。
 - **仪表测试版**是独立实验分支，不等于仪表地图已适配成功，新手不必安装。两版使用不同应用身份，需分别授权；一次只连接一版。
-- [下载 V46 中控公开试用版](https://github.com/Sykes-Shi/CarDeck-BMW/releases/download/v46-public-preview/CarDeck-BMW-v46-public.apk)，在 [发布说明](https://github.com/Sykes-Shi/CarDeck-BMW/releases/tag/v46-public-preview) 核对 SHA-256 和证书指纹。不要把 Source code 压缩包当作 APK。
-- 旧 Android Debug 签名的中控试用版无法覆盖升级到本次正式签名版。先保存需要的设置/日志，再卸载旧中控版并安装新包、重新授权；卸载会清除应用本地数据。新用户直接安装。本次不是对手机进行系统更新。
+- [下载 V47 中控公开试用版](https://github.com/Sykes-Shi/CarDeck-BMW/releases/download/v47-public-preview/CarDeck-BMW-v47-public.apk)，在 [发布说明](https://github.com/Sykes-Shi/CarDeck-BMW/releases/tag/v47-public-preview) 核对 SHA-256 和证书指纹。不要把 Source code 压缩包当作 APK。
+- 已安装 GitHub V46 公开版的用户，可直接安装 V47 保留设置。原来使用内部中控试用包的用户，请使用同渠道的 V47 覆盖升级。两个渠道的签名不同，跨渠道更换涉及卸载和清除应用数据。
 
 ## 第一次使用：六步
 
@@ -67,4 +67,4 @@
 反馈入口：[GitHub Issues](https://github.com/Sykes-Shi/CarDeck-BMW/issues)。
 请注明车型/年份、iDrive版本、手机型号/系统、APK版本、复现步骤及发生时间。上传截图或日志前遮盖精确位置、导航地址、设备标识和其他个人信息。
 
-本流程依据中控 V46 的界面和源码核对，不是所有手机/车机均通过实车测试的保证。
+本教程按 V47 中控公开试用版的界面编写。

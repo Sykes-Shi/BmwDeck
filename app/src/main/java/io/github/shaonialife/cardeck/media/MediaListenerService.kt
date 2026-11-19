@@ -197,6 +197,7 @@ class MediaListenerService : NotificationListenerService() {
                     playbackSpeed = if (playing) (state?.playbackSpeed ?: 1f) else 0f,
                     durationMs = meta?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L,
                     anchoredAtMs = playbackAnchor(state?.lastPositionUpdateTime ?: 0L, android.os.SystemClock.elapsedRealtime()),
+                    reportedPlaying = state?.takeUnless { it.state == PlaybackState.STATE_NONE }?.let { playing },
                     sessionToken = controller.sessionToken,
                     actions = state?.actions ?: 0L,
                     lyrics = lyricsFor(controller, meta, title, controller.sessionToken == primary?.sessionToken, playing),
@@ -377,6 +378,8 @@ object MediaSessionsState {
         val mediaId: String? = null,
         val album: String? = null,
         val daylightColor: Int? = null,
+        /** Null when the publisher supplies no transport state. */
+        val reportedPlaying: Boolean? = playing,
     ) {
         /** 渲染时刻的推算播放位置（播放中按速度外推，钳制在时长内）。 */
         fun displayPositionAt(elapsedRealtimeMs: Long): Long {
@@ -439,7 +442,7 @@ object MediaSessionsState {
 
     private fun sameContent(old: NowPlaying?, value: NowPlaying?): Boolean =
         old?.title == value?.title && old?.artist == value?.artist && old?.playing == value?.playing &&
-            old?.art === value?.art && old?.pkg == value?.pkg && old?.actions == value?.actions &&
+            old?.reportedPlaying == value?.reportedPlaying && old?.art === value?.art && old?.pkg == value?.pkg && old?.actions == value?.actions &&
             old?.sessionToken == value?.sessionToken && old?.durationMs == value?.durationMs &&
             old?.lyrics == value?.lyrics && old?.backdropColor == value?.backdropColor &&
             old?.daylightColor == value?.daylightColor

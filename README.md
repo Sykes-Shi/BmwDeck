@@ -8,8 +8,8 @@ CarDeck-BMW is an experimental Android project based on [CarDeck](https://github
 
 - [安装与首次连接教程](docs/QUICKSTART.md)：安装到安卓手机 → 启动 Shizuku → 配对宝马 → 启动连接。
 - [版本更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Sykes-Shi/CarDeck-BMW/issues)
-- [下载 V46 中控公开试用版 APK](https://github.com/Sykes-Shi/CarDeck-BMW/releases/download/v46-public-preview/CarDeck-BMW-v46-public.apk) · [发布说明与校验值](https://github.com/Sykes-Shi/CarDeck-BMW/releases/tag/v46-public-preview)
-- **旧调试版升级注意：**本次首次使用独立正式签名，不能覆盖旧的 Android Debug 签名包。请先保存需要的设置和日志，再卸载旧中控试用版并重新安装、授权；卸载会清除应用本地数据。新用户直接安装。
+- [下载 V47 中控公开试用版 APK](https://github.com/Sykes-Shi/CarDeck-BMW/releases/download/v47-public-preview/CarDeck-BMW-v47-public.apk) · [发布说明与校验值](https://github.com/Sykes-Shi/CarDeck-BMW/releases/tag/v47-public-preview)
+- 已安装 GitHub V46 公开版的用户，可直接安装 V47 保留设置。原来使用内部中控试用包的用户，请使用同渠道的 V47 覆盖升级。两个渠道的签名不同，跨渠道更换涉及卸载和清除应用数据。
 
 ## ID6 社区反馈（2026 年 11 月）
 
@@ -17,7 +17,7 @@ CarDeck-BMW is an experimental Android project based on [CarDeck](https://github
 
 ## 项目状态
 
-当前仓库源码对应 **V46 中控公开试用版**，在 V39 中控版本基础上继续优化，仍在开发和实车验证中。宝马车型、车机版本和手机系统存在差异，连接、声音、网络、导航和按键功能的表现可能不同。请在停车时完成配置和操作，并保留原车导航等备用方式。完整说明见 [免责声明](DISCLAIMER.md)。
+当前仓库源码对应 **V47 中控公开试用版**，在 V39 中控版本基础上继续优化，仍在开发和实车验证中。宝马车型、车机版本和手机系统存在差异，连接、声音、网络、导航和按键功能的表现可能不同。请在停车时完成配置和操作，并保留原车导航等备用方式。完整说明见 [免责声明](DISCLAIMER.md)。
 
 仪表导航测试版作为独立版本开发，使用不同的应用 ID；其源码见 [cluster-test 分支](https://github.com/Sykes-Shi/CarDeck-BMW/tree/cluster-test)，相关功能仍在实验与验证中。两版应分别安装授权，使用时一次只运行并连接其中一版。
 
@@ -53,7 +53,7 @@ gradlew.bat :app:assembleDebug
 
 构建完成后，debug APK 位于 `app/build/outputs/apk/debug/`。开发构建的应用 ID 为 `io.github.shaonialife.cardeck.bmwprobe.dev`，与公开试用版和上游版分开。
 
-公开试用版使用 `release` 构建，应用 ID 为 `io.github.shaonialife.cardeck.bmwprobe`，版本为 `0.1.13-v46-public`（versionCode 160）。构建时通过环境变量 `CARDECK_RELEASE_STORE`、`CARDECK_RELEASE_PASSWORD` 提供仓库外的 PKCS12 签名文件与口令，alias 为 `cardeck-bmw`。未提供签名时产物为 unsigned，不允许直接公开发布。密钥、加密口令及解密后的口令均不得提交到仓库。公开证书指纹与 APK SHA-256 见发布说明。
+公开试用版使用 `release` 构建，应用 ID 为 `io.github.shaonialife.cardeck.bmwprobe`，版本为 `0.1.13-v47-public`（versionCode 165）。构建时通过环境变量 `CARDECK_RELEASE_STORE`、`CARDECK_RELEASE_PASSWORD` 提供仓库外的 PKCS12 签名文件与口令，alias 为 `cardeck-bmw`。未提供签名时产物为 unsigned，不允许直接公开发布。密钥、加密口令及解密后的口令均不得提交到仓库。公开证书指纹与 APK SHA-256 见发布说明。
 
 ## 致谢与许可
 

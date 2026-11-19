@@ -17,8 +17,8 @@ android {
         applicationId = "io.github.shaonialife.cardeck.bmwprobe"
         minSdk = 31
         targetSdk = 34
-        versionCode = 160
-        versionName = "$appVersionName-v46-public"
+        versionCode = 165
+        versionName = "$appVersionName-v47-public"
     }
 
     signingConfigs {
@@ -72,7 +72,7 @@ android {
 // Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(158) }
+        variant.outputs.forEach { output -> output.versionCode.set(164) }
     }
 }
 

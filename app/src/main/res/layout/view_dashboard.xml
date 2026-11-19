@@ -20,7 +20,7 @@
                     <ImageView android:id="@+id/dashCover" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop" android:contentDescription="打开车载播放" />
                 </FrameLayout>
                 <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:layout_marginStart="8dp" android:orientation="vertical">
-                    <TextView android:id="@+id/dashMediaTitle" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:maxLines="2" android:ellipsize="end" android:text="选择一首音乐" android:textSize="19sp" android:textStyle="bold" android:textColor="@color/car_text" />
+                    <TextView android:id="@+id/dashMediaTitle" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:maxLines="2" android:ellipsize="end" android:text="选择一首音乐" android:textSize="21sp" android:textStyle="bold" android:textColor="@color/car_text" />
                     <TextView android:id="@+id/dashMediaArtist" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp" android:gravity="center" android:maxLines="2" android:ellipsize="end" android:textSize="13sp" android:textColor="@color/car_text_muted" />
                 </LinearLayout>
             </LinearLayout>
