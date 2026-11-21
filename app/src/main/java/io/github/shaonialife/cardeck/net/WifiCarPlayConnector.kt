@@ -183,6 +183,17 @@ class WifiCarPlayConnector(
         }
     }
 
+    /** Diagnose which transport received a request without binding the process or logging its address. */
+    @Suppress("DEPRECATION")
+    fun isConnectedWifiAddress(address: String): Boolean? = runCatching {
+        connectivityManager.allNetworks.any { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                hasLocalAddress(network, address.substringBefore('%'))
+        }
+    }.getOrNull()
+
     /** Correlate the incoming ctrl socket with a specific Android Network before binding it. */
     fun hasLocalAddress(network: Network, address: String): Boolean = runCatching {
         connectivityManager.getLinkProperties(network)?.linkAddresses?.any {

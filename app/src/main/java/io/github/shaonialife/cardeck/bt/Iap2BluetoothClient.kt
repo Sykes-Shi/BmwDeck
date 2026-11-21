@@ -202,7 +202,7 @@ class Iap2BluetoothClient(
         ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) ==
             PackageManager.PERMISSION_GRANTED
 
-    fun start(): Boolean {
+    fun start(inboundWaitMillis: Long = 0L): Boolean {
         if (running) return true
         if (!hasPermission()) {
             log("BT-C: 缺少 BLUETOOTH_CONNECT 权限")
@@ -226,15 +226,26 @@ class Iap2BluetoothClient(
         running = true
         val myGeneration = generation.incrementAndGet()
         val target = targetProvider()
-        log(
-            "BT-C: 启动——将主动连入车机的无线 iAP2 服务（…caff）" +
-                if (target != null) {
-                    "（只连接已选目标）"
-                } else {
-                    "（未指定目标：依次尝试全部候选设备，可在「连接准备」中指定）"
-                },
-        )
-        Thread({ connectLoop(myGeneration, disconnectProfiles, probeSelected) }, "iap2-bt-client").apply {
+        val targetDescription = if (target != null) {
+            "（只连接已选目标）"
+        } else {
+            "（未指定目标：依次尝试全部候选设备，可在「连接准备」中指定）"
+        }
+        if (inboundWaitMillis > 0L) {
+            log("BT-C: 先等车机回连 ${inboundWaitMillis / 1_000} 秒，期间暂停主动探测和连接")
+        }
+        Thread({
+            if (inboundWaitMillis > 0L) {
+                try {
+                    Thread.sleep(inboundWaitMillis)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+            }
+            if (!running || generation.get() != myGeneration) return@Thread
+            log("BT-C: 允许手机主动连接车机的无线 iAP2 服务（…caff）$targetDescription")
+            connectLoop(myGeneration, disconnectProfiles, probeSelected)
+        }, "iap2-bt-client").apply {
             isDaemon = true
             thread = this
             start()

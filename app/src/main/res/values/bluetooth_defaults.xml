@@ -1,3 +1,4 @@
 <resources>
     <bool name="keep_system_bluetooth_default">false</bool>
+    <bool name="prefer_car_bluetooth_callback">false</bool>
 </resources>

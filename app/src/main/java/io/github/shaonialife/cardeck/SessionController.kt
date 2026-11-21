@@ -77,6 +77,7 @@ import java.util.concurrent.atomic.AtomicLong
  * 销毁/重建对其无影响。会话逻辑线程通过 [appContext] 运行，不依赖任何 Activity。
  */
 object SessionController {
+    private const val CAR_CALLBACK_WINDOW_MS = 30_000L
     internal val steeringDialProbe = SteeringDialProbe()
     // ---- 日志缓冲（进程级；Activity 订阅渲染）----
 
@@ -507,7 +508,13 @@ object SessionController {
                     shouldDisconnectProfiles = { activeBluetoothCompatibility.disconnectProfiles },
                     shouldProbeSelectedDevice = { activeBluetoothCompatibility.probeSelectedDevice },
                 )
-            ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
+            ctrlAdvertiser = CarPlayCtrlAdvertiser(
+                context,
+                log = ::appendLog,
+                onInvitation = if (context.resources.getBoolean(R.bool.prefer_car_bluetooth_callback)) {
+                    ::logTrialInvitation
+                } else null,
+            )
             endpointBrowser =
                 CarPlayServiceBrowser(
                     context,
@@ -541,6 +548,9 @@ object SessionController {
             bluetoothServer?.isRunning == true ||
             bluetoothClient?.isRunning == true
 
+    fun prefersCarBluetoothCallback(context: Context): Boolean =
+        context.resources.getBoolean(R.bool.prefer_car_bluetooth_callback) && TargetDevicePrefs.get(context) != null
+
     /** Pairing cleanup must honor both the current preference and a running session snapshot. */
     fun allowsPostBondDisconnect(
         context: Context,
@@ -573,7 +583,12 @@ object SessionController {
         val connectionEpoch = wifiJoins.activate(VpnCoexistencePrefs.isEnabled(context))
         connectCancelled = false
         endpointCallbacks.activate()
-        phaseHint = "蓝牙就绪，等待车机回连…"
+        val preferCallback = prefersCarBluetoothCallback(context)
+        phaseHint = if (preferCallback) {
+            "请在车机选择 Apple CarPlay，等待建立连接…"
+        } else {
+            "蓝牙就绪，等待车机回连…"
+        }
         when (
             ShizukuGate
                 .state(context)
@@ -603,10 +618,13 @@ object SessionController {
         ctrlAdvertiser?.resetInviteCount()
         // 后台发布：start() 首次要向 Shizuku 解析真实蓝牙 MAC（shell），不能在主线程做
         Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
-        // 真车路径：手机主动连车机（SDP …caff 配件服务）
-        // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
-        bluetoothClient?.start()
-        bluetoothServer?.start()
+        if (preferCallback && bluetoothServer?.start() == true) {
+            // Give iDrive a window to initiate Bluetooth without competing SDP or RFCOMM requests.
+            bluetoothClient?.start(inboundWaitMillis = CAR_CALLBACK_WINDOW_MS)
+        } else {
+            bluetoothClient?.start()
+            if (!preferCallback) bluetoothServer?.start()
+        }
         // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
         // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
         Bg.run("bt-profile-diag") {
@@ -1342,6 +1360,21 @@ object SessionController {
 
     private fun selectedCtrlReceiver(): Long? =
         appContext?.let { TargetDevicePrefs.get(it)?.address }?.replace(":", "")?.toLongOrNull(16)
+
+    private fun logTrialInvitation(receiver: Long?, localAddress: String?) {
+        if (connectCancelled) return
+        val selected = selectedCtrlReceiver()
+        val match = when {
+            receiver == null || selected == null -> "unknown"
+            receiver == selected -> "yes"
+            else -> "no"
+        }
+        val wifiAddress = localAddress?.let { wifiConnector?.isConnectedWifiAddress(it) }
+        appendLog(
+            "CTRL: 本轮邀请诊断 targetMatch=$match onWifi=${wifiAddress ?: "unknown"}" +
+                " inboundBluetoothActive=${BtSessionGate.inboundActive} carWifiBound=${boundCarSsid != null}",
+        )
+    }
 
     private class BmwRecoveryInvite(val network: android.net.Network, val take: () -> Boolean)
 

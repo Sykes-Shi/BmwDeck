@@ -25,6 +25,7 @@ import java.net.Socket
 class CarPlayCtrlAdvertiser(
     private val context: Context,
     private val log: (String) -> Unit,
+    private val onInvitation: ((receiver: Long?, localAddress: String?) -> Unit)? = null,
 ) {
     companion object {
         const val SERVICE_TYPE = "_carplay-ctrl._tcp"
@@ -286,11 +287,18 @@ class CarPlayCtrlAdvertiser(
                 val receiverId = head.lineSequence().firstOrNull {
                     it.substringBefore(':').trim().equals("AirPlay-Receiver-Device-ID", ignoreCase = true)
                 }?.substringAfter(':')?.trim()
-                synchronized(this) {
-                    if (listener === serverSocket && connection === invitations) {
-                        val count = connection.acknowledge(SystemClock.elapsedRealtime(), client.localAddress?.hostAddress, receiverId)
+                val localAddress = client.localAddress?.hostAddress
+                val recorded = synchronized(this) {
+                    if (listener !== serverSocket || connection !== invitations) {
+                        false
+                    } else {
+                        val count = connection.acknowledge(SystemClock.elapsedRealtime(), localAddress, receiverId)
                         log("$TAG: ✓ 已应答车机 ctrl 邀请（第 $count 次，receiver=${receiverId ?: "?"}）")
+                        true
                     }
+                }
+                if (recorded && connection === invitations) {
+                    onInvitation?.invoke(receiverId?.toLongOrNull(), localAddress)
                 }
             }
 

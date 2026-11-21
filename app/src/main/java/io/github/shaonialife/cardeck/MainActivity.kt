@@ -2,7 +2,9 @@ package io.github.shaonialife.cardeck
 
 import android.Manifest
 import android.animation.ObjectAnimator
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -186,6 +188,21 @@ class MainActivity : AppCompatActivity() {
     private val pendingStartAfterBtPermission =
         java.util.concurrent.atomic
             .AtomicBoolean(false)
+
+    private var pendingCarVisibilityTarget: String? = null
+
+    private val carVisibilityPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (pendingCarVisibilityTarget == null) return@registerForActivityResult
+            if (granted) requestCarVisibility() else finishCarVisibility("permission_denied")
+        }
+
+    private val carVisibilityLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            finishCarVisibility(
+                if (result.resultCode > 0) "allowed seconds=${result.resultCode}" else "cancelled_or_unavailable",
+            )
+        }
 
     /** 车机壁纸选择（Photo Picker；无需存储权限）。选中即持久化并通知合成器换图。 */
     private val wallpaperPicker =
@@ -592,22 +609,71 @@ class MainActivity : AppCompatActivity() {
                 if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
                     PackageManager.PERMISSION_GRANTED
                 ) {
+                    pendingStartAfterBtPermission.set(true)
                     permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                    return@ensureTouchServiceReady
                 }
-                // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活
-                if (Build.VERSION.SDK_INT >= 33 &&
-                    ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") !=
-                    PackageManager.PERMISSION_GRANTED
-                ) {
-                    permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
+                if (SessionController.isSessionRunning() || pendingCarVisibilityTarget != null) {
+                    return@ensureTouchServiceReady
                 }
-                SessionController.startConnection(this)
+                val target = TargetDevicePrefs.get(this)
+                if (target != null && SessionController.prefersCarBluetoothCallback(this)) {
+                    pendingCarVisibilityTarget = target.address
+                    if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) ==
+                        PackageManager.PERMISSION_GRANTED
+                    ) {
+                        requestCarVisibility()
+                    } else {
+                        carVisibilityPermissionLauncher.launch(Manifest.permission.BLUETOOTH_ADVERTISE)
+                    }
+                } else {
+                    startPreparedConnection()
+                }
             }
         }
     }
 
+    private fun requestCarVisibility() {
+        val bluetoothOn = runCatching { getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true }
+            .getOrDefault(false)
+        if (!bluetoothOn) {
+            finishCarVisibility("bluetooth_unavailable")
+            return
+        }
+        try {
+            carVisibilityLauncher.launch(
+                Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                    .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 60),
+            )
+        } catch (_: RuntimeException) {
+            finishCarVisibility("unavailable")
+        }
+    }
+
+    private fun finishCarVisibility(outcome: String) {
+        val address = pendingCarVisibilityTarget ?: return
+        pendingCarVisibilityTarget = null
+        if (isFinishing || isDestroyed) return
+        val target = TargetDevicePrefs.get(this) ?: return
+        if (!TargetDevicePrefs.matches(target, address) || SessionController.isSessionRunning()) return
+        log("BT: 临时蓝牙可见性 result=$outcome")
+        startPreparedConnection()
+    }
+
+    private fun startPreparedConnection() {
+        // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活。
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
+        }
+        SessionController.startConnection(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingCarVisibilityTarget = savedInstanceState?.getString("carVisibilityTarget")
         setContentView(R.layout.activity_main)
         findViewById<View>(R.id.btnCarShortcuts).setOnClickListener { io.github.shaonialife.cardeck.ui.CarShortcutDialog(this).open() }
         localLyricsImport = io.github.shaonialife.cardeck.ui.LocalLyricsImport(this, savedInstanceState)
@@ -2437,6 +2503,7 @@ class MainActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
         localLyricsImport.save(outState)
         outState.putLong(KEY_DISCLAIMER_DEADLINE, disclaimerDeadlineAt)
+        outState.putString("carVisibilityTarget", pendingCarVisibilityTarget)
     }
 
     /**
