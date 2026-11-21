@@ -20,6 +20,10 @@ class Iap2LinkChannel(
     private val lock = Object()
     private val controls = LinkedBlockingQueue<ByteArray?>()
     private val readyLatch = CountDownLatch(1)
+    private val peerInputLatch = CountDownLatch(1)
+
+    @Volatile
+    private var receivedPeerInput = false
 
     @Volatile
     private var terminated = false
@@ -73,6 +77,10 @@ class Iap2LinkChannel(
             start()
         }
     }
+
+    /** Wait for the first bytes from the peer; a closed stream also wakes the caller. */
+    internal fun awaitPeerInput(timeoutMillis: Long): Boolean =
+        peerInputLatch.await(timeoutMillis, TimeUnit.MILLISECONDS) && receivedPeerInput && !terminated
 
     /** 等待链路协商完成（会话 10 可写）。 */
     fun awaitReady(timeoutMillis: Long): Boolean {
@@ -131,6 +139,10 @@ class Iap2LinkChannel(
                 if (count == 0) continue
                 synchronized(lock) {
                     if (terminated) return
+                    if (!receivedPeerInput) {
+                        receivedPeerInput = true
+                        peerInputLatch.countDown()
+                    }
                     dumpInbound(buffer.copyOf(count))
                     engine.feed(buffer.copyOf(count), nowMillis())
                     processEventsLocked()
@@ -235,6 +247,7 @@ class Iap2LinkChannel(
         terminated = true
         controls.offer(POISON) // 哨兵：唤醒阻塞的接收方（LBQ 不接受 null）
         readyLatch.countDown()
+        peerInputLatch.countDown()
         lock.notifyAll()
         runCatching { stream.close() }
         if (failure != null) {

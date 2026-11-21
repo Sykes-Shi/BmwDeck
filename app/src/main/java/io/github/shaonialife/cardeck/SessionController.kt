@@ -77,6 +77,9 @@ import java.util.concurrent.atomic.AtomicLong
  * 销毁/重建对其无影响。会话逻辑线程通过 [appContext] 运行，不依赖任何 Activity。
  */
 object SessionController {
+    private const val CAR_CALLBACK_WINDOW_MS = 30_000L
+    private const val CAR_FIRST_INPUT_TIMEOUT_MS = 12_000L
+
     internal val steeringDialProbe = SteeringDialProbe()
     // ---- 日志缓冲（进程级；Activity 订阅渲染）----
 
@@ -602,9 +605,23 @@ object SessionController {
         ctrlAdvertiser?.resetInviteCount()
         // 后台发布：start() 首次要向 Shizuku 解析真实蓝牙 MAC（shell），不能在主线程做
         Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
-        // 手机可以主动发起连接，也可以由监听端接收车机回连。
-        bluetoothClient?.start()
-        bluetoothServer?.start()
+        val callbackFirst = context.resources.getBoolean(R.bool.prefer_car_bluetooth_callback) &&
+            TargetDevicePrefs.get(context.applicationContext) != null
+        if (callbackFirst) {
+            val listening = bluetoothServer?.start() == true
+            phaseHint = if (listening) {
+                "请在车机选择 Apple CarPlay，等待车机主动连接…"
+            } else {
+                "车机回连监听未启动，手机将主动尝试连接…"
+            }
+            bluetoothClient?.start(
+                inboundWaitMillis = if (listening) CAR_CALLBACK_WINDOW_MS else 0L,
+                firstInputTimeoutMillis = CAR_FIRST_INPUT_TIMEOUT_MS,
+            )
+        } else {
+            bluetoothClient?.start()
+            bluetoothServer?.start()
+        }
         // 记录启动时的配置状态。查询在线程内完成，状态可能随连接变化。
         Bg.run("bt-profile-diag") {
             val target = appContext?.let { TargetDevicePrefs.get(it) } ?: return@run

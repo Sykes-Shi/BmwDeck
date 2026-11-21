@@ -161,7 +161,7 @@ class Iap2BluetoothClient(
         ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) ==
             PackageManager.PERMISSION_GRANTED
 
-    fun start(): Boolean {
+    fun start(inboundWaitMillis: Long = 0L, firstInputTimeoutMillis: Long = 0L): Boolean {
         if (running) return true
         if (!hasPermission()) {
             log("BT-C: 缺少 BLUETOOTH_CONNECT 权限")
@@ -183,16 +183,20 @@ class Iap2BluetoothClient(
         val disconnectProfiles = runCatching { shouldDisconnectProfiles() }.getOrDefault(true)
         running = true
         val myGeneration = generation.incrementAndGet()
-        val target = targetProvider()
-        log(
-            "BT-C: 启动——将主动连入车机的无线 iAP2 服务（…caff）" +
-                if (target != null) {
-                    "（只连接已选目标）"
-                } else {
-                    "（未指定目标：依次尝试全部候选设备，可在「连接准备」中指定）"
-                },
-        )
-        Thread({ connectLoop(myGeneration, disconnectProfiles) }, "iap2-bt-client").apply {
+        if (inboundWaitMillis > 0L) {
+            log("BT-C: 先等待车机回连 ${inboundWaitMillis / 1_000} 秒，期间暂停手机主动连接")
+        }
+        Thread({
+            if (inboundWaitMillis > 0L) sleepQuietly(inboundWaitMillis)
+            if (!running || generation.get() != myGeneration || Thread.currentThread().isInterrupted) return@Thread
+            val targetDescription = if (targetProvider() != null) {
+                "（只连接已选目标）"
+            } else {
+                "（未指定目标：依次尝试全部候选设备）"
+            }
+            log("BT-C: 已允许手机主动连接车机 iAP2 服务$targetDescription")
+            connectLoop(myGeneration, disconnectProfiles, firstInputTimeoutMillis)
+        }, "iap2-bt-client").apply {
             isDaemon = true
             thread = this
             start()
@@ -201,7 +205,7 @@ class Iap2BluetoothClient(
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectLoop(myGeneration: Long, disconnectProfiles: Boolean) {
+    private fun connectLoop(myGeneration: Long, disconnectProfiles: Boolean, firstInputTimeoutMillis: Long) {
         val adapter =
             try {
                 context.getSystemService(BluetoothManager::class.java)?.adapter
@@ -285,7 +289,7 @@ class Iap2BluetoothClient(
                     connected = socket
                     sessionAllowed = allowed
                     break
-                } else {
+                } else if (attemptStillValid()) {
                     val now = android.os.SystemClock.uptimeMillis()
                     if (now - lastFailureLogAt > FAILURE_LOG_THROTTLE_MILLIS) {
                         lastFailureLogAt = now
@@ -306,7 +310,7 @@ class Iap2BluetoothClient(
                 if (!BluetoothConnectionDiagnostics.retryAfterInvalidSocket(running, generation.get() == myGeneration)) return
                 continue
             }
-            runSession(sessionSocket, myGeneration, sessionCheck)
+            runSession(sessionSocket, myGeneration, sessionCheck, firstInputTimeoutMillis)
             sleepQuietly(RETRY_DELAY_MILLIS)
         }
         log("BT-C: 客户端已停止")
@@ -405,14 +409,19 @@ class Iap2BluetoothClient(
             log("BT-C: RFCOMM stage=connect result=success elapsedMs=${android.os.SystemClock.elapsedRealtime() - connectAt}")
             socket
         } catch (error: Exception) {
-            currentSocket.compareAndSet(socket, null)
+            val wasCurrent = currentSocket.compareAndSet(socket, null)
             runCatching { socket.close() }
-            if (running && generation.get() == myGeneration) failed("connect", connectAt, error)
+            if (wasCurrent && allowed()) failed("connect", connectAt, error)
             null
         }
     }
 
-    private fun runSession(socket: BluetoothSocket, myGeneration: Long, allowed: () -> Boolean) {
+    private fun runSession(
+        socket: BluetoothSocket,
+        myGeneration: Long,
+        allowed: () -> Boolean,
+        firstInputTimeoutMillis: Long,
+    ) {
         val stream = try {
             StreamDuplexStream(socket.inputStream, socket.outputStream) {
                 runCatching { socket.close() }
@@ -438,9 +447,23 @@ class Iap2BluetoothClient(
             return
         }
         try {
+            if (firstInputTimeoutMillis > 0L) {
+                val receivedInput = channel.awaitPeerInput(firstInputTimeoutMillis)
+                if (!allowed() || currentSocket.get() !== socket) return
+                if (!receivedInput) {
+                    val result = if (channel.isAlive) "timeout" else "closed"
+                    log("BT-C: iAP2 stage=first_input result=$result limitMs=$firstInputTimeoutMillis，释放主动连接")
+                    return
+                }
+                log("BT-C: iAP2 stage=first_input result=received")
+            }
             channel.runSenderSession(context, SESSION_TIMEOUT_MILLIS, log, onEndpoint, onWifiCredentials, onEndpointUpdate)
         } catch (error: IOException) {
-            log("BT-C: SESSION 失败 type=${error.javaClass.simpleName} category=${BluetoothConnectionDiagnostics.errorCategory(error)}")
+            if (generation.get() == myGeneration && currentSocket.get() === socket) {
+                log("BT-C: SESSION 失败 type=${error.javaClass.simpleName} category=${BluetoothConnectionDiagnostics.errorCategory(error)}")
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
         } finally {
             synchronized(socketLock) {
                 if (BluetoothConnectionDiagnostics.ownsSession(activeChannel, channel)) activeChannel = null
@@ -448,7 +471,7 @@ class Iap2BluetoothClient(
             }
             runCatching { socket.close() }
             channel.close()
-            log("BT-C: 本轮会话结束（客户端仍在运行，将自动重连）")
+            if (allowed()) log("BT-C: 本轮手机主动连接已结束")
         }
     }
 
@@ -485,6 +508,7 @@ class Iap2BluetoothClient(
         try {
             Thread.sleep(millis)
         } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
         }
     }
 }
