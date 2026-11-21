@@ -1,0 +1,3 @@
+<resources>
+    <bool name="keep_system_bluetooth_default">false</bool>
+</resources>

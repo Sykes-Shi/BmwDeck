@@ -510,6 +510,38 @@
                     android:layout_marginStart="54dp"
                     android:background="#5A394444" />
 
+                <!-- 一加 ID6 调试版默认保留系统蓝牙。 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingStart="54dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="10dp">
+
+                    <androidx.appcompat.widget.SwitchCompat
+                        android:id="@+id/switchKeepSystemBluetooth"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:minHeight="48dp"
+                        android:text="保留系统蓝牙连接（兼容测试）"
+                        android:textColor="@color/m3_on_surface"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="开启后 CarDeck 不主动断开车机电话和音频。切换后请重新启动连接。"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginStart="54dp"
+                    android:background="#5A394444" />
+
                 <!-- 车机热点 -->
                 <LinearLayout
                     android:layout_width="match_parent"

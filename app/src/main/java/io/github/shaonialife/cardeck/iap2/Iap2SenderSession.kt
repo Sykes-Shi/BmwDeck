@@ -99,9 +99,6 @@ class Iap2SenderSession(
     @Volatile
     private var wifi: WifiConfiguration? = null
 
-    /** 0x4301 原始体是否已记录（每轮会话一次，避免周期补发刷屏）。 */
-    private var startSessionRawLogged = false
-
     /** 最近一次晚到 0x4301 的端点指纹（车机周期重发相同内容时不重复打详情）。 */
     private var lastLateStartSessionSignature: Int? = null
 
@@ -144,9 +141,6 @@ class Iap2SenderSession(
          * BMW iD9 实测整个 bring-up 在 10 秒量级，给 8 秒。
          */
         const val START_SESSION_WAIT_NEW_PROTOCOL_NANOS = 8_000_000_000L
-
-        /** 0x4301 原始体日志上限（Audi 实测 261B，完整记录；异常大的只截前段）。 */
-        const val START_SESSION_RAW_LOG_BYTES = 1_024
 
         /**
          * 已知「静默过」的档位重试窗口。首次试探保留原窗口（可能是慢车机），
@@ -395,11 +389,9 @@ class Iap2SenderSession(
                 )
             }
         if (startSession != null) {
-            logStartSessionRaw(startSession)
             log(
-                "iap2 rx=0x4301 airPlayPort=${endpoint.airPlayPort} " +
-                    "device=${endpoint.deviceIdentifier} publicKey=${endpoint.publicKey?.take(16)}… " +
-                    "srcvers=${endpoint.sourceVersion} ips=${endpoint.ipAddresses}",
+                "iap2 rx=0x4301 热点=${endpoint.ssid.isNotEmpty()} " +
+                    "端口=${endpoint.airPlayPort != 0} 地址=${endpoint.ipAddresses.isNotEmpty()}",
             )
         }
 
@@ -499,7 +491,6 @@ class Iap2SenderSession(
      * 无线组解析——这正是这类车机唯一的凭据来源，不能像旧代码那样「无 0x5703 就忽略」。
      */
     private fun handleLateStartSession(frame: Iap2Csm.Frame) {
-        logStartSessionRaw(frame)
         val endpoint = parseStartSession(frame, wifi)
         if (wifi == null && endpoint.ssid.isNotEmpty()) {
             wifi =
@@ -509,7 +500,7 @@ class Iap2SenderSession(
                     channel = endpoint.channel,
                     securityType = endpoint.securityType,
                 )
-            log("iap2 0x4301 自带 AP 信息：ssid=${endpoint.ssid}——已缓存，供后续 0x5703/0x4301 复用")
+            log("iap2 0x4301 自带 AP 信息：已缓存，供后续 0x5703/0x4301 复用")
         }
         if (endpoint.ssid.isEmpty()) {
             log("iap2 rx=0x4301（晚到）——无线组里没解析出 SSID，本条忽略")
@@ -519,23 +510,12 @@ class Iap2SenderSession(
         if (endpoint.hashCode() != lastLateStartSessionSignature) {
             lastLateStartSessionSignature = endpoint.hashCode()
             log(
-                "iap2 rx=0x4301（晚到，Phase 1 之后）airPlayPort=${endpoint.airPlayPort} " +
-                    "device=${endpoint.deviceIdentifier} publicKey=${endpoint.publicKey?.take(16)}… " +
-                    "srcvers=${endpoint.sourceVersion} ips=${endpoint.ipAddresses}" +
+                "iap2 rx=0x4301（晚到，Phase 1 之后）热点=${endpoint.ssid.isNotEmpty()} " +
+                    "端口=${endpoint.airPlayPort != 0} 地址=${endpoint.ipAddresses.isNotEmpty()}" +
                     "——交给主控热更新端点/重试配对",
             )
         }
         onEndpointUpdate?.invoke(endpoint)
-    }
-
-    /** 0x4301 原始体只记一次：车机间端点字段差异（有无 IPv4/端口/公钥）只能靠它定谳。 */
-    private fun logStartSessionRaw(frame: Iap2Csm.Frame) {
-        if (startSessionRawLogged) return
-        startSessionRawLogged = true
-        val body = frame.body
-        val shown = if (body.size <= START_SESSION_RAW_LOG_BYTES) body else body.copyOf(START_SESSION_RAW_LOG_BYTES)
-        val truncated = if (body.size > shown.size) "（前 ${shown.size}/${body.size} 字节）" else ""
-        log("iap2 0x4301 原始体$truncated=" + shown.joinToString("") { "%02x".format(it) })
     }
 
     // ---- 帧收发 ----
@@ -866,7 +846,7 @@ class Iap2SenderSession(
      * 新协议无线组与 CarPlay Addendum 的 AccessoryWiFiConfigurationInformation 同构
      * （0/1=SSID/密码、2=信道、3=IP、4=安全类型），但个别实现从 1 起编号（本项目 0x5703
      * 解析即 1/2/3/4）——两种都兼容：前两个「非 IP」的 NUL 结尾字符串依次当 SSID/密码，
-     * 单字节字段按取值范围归类。原始字节每次都打日志，真车实测后可直接校正。
+     * 单字节字段按取值范围归类。诊断只记录参数编号、长度和存在状态。
      */
     private fun parseStartSession(
         frame: Iap2Csm.Frame,
@@ -888,7 +868,7 @@ class Iap2SenderSession(
             log(
                 "iap2 0x4301 无线组参数: " +
                     wireless.joinToString(" ") { param ->
-                        "#${param.id}=" + param.value.joinToString("") { "%02x".format(it) }
+                        "#${param.id}(${param.value.size}B)"
                     },
             )
         }
@@ -896,8 +876,7 @@ class Iap2SenderSession(
         val ap = wifi ?: fromSession
         if (wifi == null && fromSession != null) {
             log(
-                "iap2 0x4301 自带 AP：ssid=${fromSession.ssid} channel=${fromSession.channel} " +
-                    "security=${fromSession.securityType} psk=${if (fromSession.passphrase.isEmpty()) "(空)" else "***"}",
+                "iap2 0x4301 自带 AP：热点=${fromSession.ssid.isNotEmpty()} 密码=${fromSession.passphrase.isNotEmpty()}",
             )
         }
         return CarPlayEndpoint(

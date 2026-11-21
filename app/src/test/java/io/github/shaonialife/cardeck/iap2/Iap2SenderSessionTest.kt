@@ -44,8 +44,20 @@ class Iap2SenderSessionTest {
     fun bmwLateStartSessionDespiteOmittedDeclarationProvidesEndpoint() {
         val result = runBmwScenario(BmwResponse.START_AFTER_AVAILABILITY)
         assertEquals("MockAP", result.endpoint!!.ssid)
+        assertEquals("secret-passphrase", result.endpoint.passphrase)
         assertEquals(49152, result.endpoint.airPlayPort)
         assertEquals(0, result.wifiCallbacks)
+        assertTrue(result.events.any { it.contains("0x4301 无线组参数:") && it.contains("#1(") })
+        assertNoWifiSecret(result.events)
+    }
+
+    private fun assertNoWifiSecret(events: List<String>) {
+        val secret = "secret-passphrase"
+        val encoded = secret.toByteArray().joinToString("") { "%02x".format(it) }
+        assertTrue("logs must not contain the plaintext or hex password", events.none {
+            it.contains(secret) || it.contains(encoded, ignoreCase = true)
+        })
+        assertTrue("logs must not contain the full 0x4301 body", events.none { it.contains("0x4301 原始体") })
     }
 
     @Test
@@ -332,11 +344,12 @@ class Iap2SenderSessionTest {
         accessoryThread.start()
 
         val updates = AtomicReference<Iap2SenderSession.CarPlayEndpoint?>()
+        val logs = java.util.Collections.synchronizedList(mutableListOf<String>())
         val updateLatch = CountDownLatch(1)
         val session =
             Iap2SenderSession(
                 phoneChannel,
-                log = { line -> println("PHONE $line") },
+                log = { line -> logs.add(line) },
                 bluetoothMac = "34:86:DA:86:BB:96",
                 deviceName = "test-device",
                 onEndpointUpdate = {
@@ -360,6 +373,8 @@ class Iap2SenderSessionTest {
         assertEquals(49152, late.airPlayPort)
         assertEquals(listOf("192.168.49.1", "fd00::1"), late.ipAddresses)
         assertEquals("mock-device-id", late.deviceIdentifier)
+        assertEquals("secret-passphrase", late.passphrase)
+        assertNoWifiSecret(synchronized(logs) { logs.toList() })
 
         phoneChannel.close()
         accessoryChannel.close()
