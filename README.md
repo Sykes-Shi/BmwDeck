@@ -13,7 +13,7 @@ CarDeck-BMW is an experimental Android project based on [CarDeck](https://github
 
 ## 车机兼容性：社区试用反馈（2026 年 11 月）
 
-- **ID5、ID6、ID8**：抖音群友均反馈过成功连接的个例。
+- 抖音群已有 iDrive 6（ID6）成功连接的个例；其他车机代际的成功反馈还在核对。
 - **ID6 补充**：另有一位抖音视频评论区用户反馈，其原车带无线 CarPlay 的 ID6 已实现安卓手机直连。
 
 这些是用户反馈的连接个例；车机固件、手机型号、系统版本及其他功能尚未全面验证，不代表对应代际的所有车型均可用，也不代表原车不带无线 CarPlay 的车机可用。本项目仍主要围绕 iDrive 7 优化，更多车型与手机组合正在探索。欢迎在 [Issues](https://github.com/Sykes-Shi/CarDeck-BMW/issues) 补充配置与测试结果。
