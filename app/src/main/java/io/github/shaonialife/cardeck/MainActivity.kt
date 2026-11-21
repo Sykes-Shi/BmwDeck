@@ -2,7 +2,9 @@ package io.github.shaonialife.cardeck
 
 import android.Manifest
 import android.animation.ObjectAnimator
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -64,10 +66,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var localLyricsImport: io.github.shaonialife.cardeck.ui.LocalLyricsImport
     private enum class HeroState { IDLE, CONNECTING, CONNECTED }
 
+    private enum class BluetoothPermissionAction { PREPARE_CONNECTION, START_CONNECTION, PICK_TARGET }
+
     /** 连接中的默认副标题（无阶段提示时）。 */
     private companion object {
         const val DEFAULT_CONNECTING_HINT = "蓝牙 iAP2 握手 → 加入车机热点 → 建立 CarPlay 会话"
         const val KEY_DISCLAIMER_DEADLINE = "disclaimer_deadline"
+        const val KEY_BLUETOOTH_PERMISSION_ACTION = "bluetooth_permission_action"
+        const val KEY_PENDING_CAR_VISIBILITY_TARGET = "pending_car_visibility_target"
+        const val CAR_VISIBILITY_SECONDS = 60
     }
 
     private val phoneDestinationInput by lazy { io.github.shaonialife.cardeck.ui.PhoneDestinationInput(this) }
@@ -173,19 +180,49 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread { ssidInput.setText(ssid) }
     }
 
-    private val permissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    private var pendingBluetoothPermissionAction: BluetoothPermissionAction? = null
+
+    private val bluetoothConnectPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            val action = pendingBluetoothPermissionAction
+            pendingBluetoothPermissionAction = null
+            val granted = hasBluetoothConnectPermission()
             log("BLUETOOTH_CONNECT 授权: $granted")
-            if (granted && pendingStartAfterBtPermission.compareAndSet(true, false)) {
-                // 授权期间 Shizuku 可能被停掉：这里同样走前置检查
-                ensureShizukuReady { showAudioChoiceDialog() }
+            updateReadyRow()
+            if (!granted) {
+                if (action != null) showBluetoothPermissionHelp()
+                return@registerForActivityResult
+            }
+            when (action) {
+                BluetoothPermissionAction.PREPARE_CONNECTION -> prepareConnection()
+                BluetoothPermissionAction.START_CONNECTION -> startConnectionNow()
+                BluetoothPermissionAction.PICK_TARGET -> showTargetPicker()
+                null -> Unit
             }
         }
 
-    /** 蓝牙权限授权后自动继续启动连接。 */
-    private val pendingStartAfterBtPermission =
-        java.util.concurrent.atomic
-            .AtomicBoolean(false)
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            log("POST_NOTIFICATIONS 授权: $granted（仅用于显示连接通知）")
+        }
+
+    private var pendingCarVisibilityTarget: String? = null
+
+    private val carVisibilityPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (pendingCarVisibilityTarget == null) return@registerForActivityResult
+            if (granted) requestCarVisibility() else finishCarVisibility("permission_denied")
+        }
+
+    private val carVisibilityLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val outcome = if (result.resultCode > 0) {
+                "allowed seconds=${result.resultCode}"
+            } else {
+                "declined_or_unavailable"
+            }
+            finishCarVisibility(outcome)
+        }
 
     /** 车机壁纸选择（Photo Picker；无需存储权限）。选中即持久化并通知合成器换图。 */
     private val wallpaperPicker =
@@ -289,17 +326,71 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun hasBluetoothConnectPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+
+    private fun requestBluetoothConnectPermission(action: BluetoothPermissionAction) {
+        if (pendingBluetoothPermissionAction != null) return
+        pendingBluetoothPermissionAction = action
+        bluetoothConnectPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+    }
+
+    private fun showBluetoothPermissionHelp() {
+        DarkMessageDialog.show(
+            activity = this,
+            title = "需要附近的设备权限",
+            message = "请在应用权限中允许「附近的设备」，然后回到 CarDeck 选择或连接车机。",
+            actions =
+                listOf(
+                    DarkMessageDialog.Action("取消") {},
+                    DarkMessageDialog.Action("打开应用设置", DarkMessageDialog.Emphasis.PRIMARY) {
+                        val appSettings =
+                            Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+                        runCatching { startActivity(appSettings) }
+                            .onFailure { snack("请手动打开系统设置中的 CarDeck 应用权限") }
+                    },
+                ),
+        )
+    }
+
+    private fun prepareConnection() {
+        ensureShizukuReady {
+            ensureBluetoothReady {
+                if (!resources.getBoolean(R.bool.prefer_car_bluetooth_callback) || requirePairedTrialTarget() != null) {
+                    showAudioChoiceDialog()
+                }
+            }
+        }
+    }
+
+    private fun requirePairedTrialTarget(): TargetDevicePrefs.Target? {
+        if (!hasBluetoothConnectPermission()) {
+            showBluetoothPermissionHelp()
+            return null
+        }
+        val target = TargetDevicePrefs.get(this)
+        if (target != null) {
+            val paired = try {
+                getSystemService(BluetoothManager::class.java)?.adapter?.bondedDevices
+                    ?.any { TargetDevicePrefs.matches(target, it.address) } == true
+            } catch (_: SecurityException) {
+                showBluetoothPermissionHelp()
+                return null
+            }
+            if (paired) return target
+        }
+        snack("请先选择已配对的宝马车机")
+        showTargetPicker()
+        return null
+    }
+
     /**
-     * 启动连接的前置检查：蓝牙权限 → 蓝牙开关 → WLAN 位置权限（仅 Android 12/12L）。
+     * 启动连接前检查蓝牙权限、蓝牙开关和 Android 12/12L 的 WLAN 位置权限。
      * 任一不满足都弹窗引导（蓝牙关闭时可一键跳系统蓝牙设置），通过后回调继续。
      */
     private fun ensureBluetoothReady(onReady: () -> Unit) {
-        val granted =
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
-                PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            pendingStartAfterBtPermission.set(true)
-            permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        if (!hasBluetoothConnectPermission()) {
+            requestBluetoothConnectPermission(BluetoothPermissionAction.PREPARE_CONNECTION)
             return
         }
         ensureWifiLocationReady {
@@ -309,7 +400,9 @@ class MainActivity : AppCompatActivity() {
                         .adapter
                         ?.isEnabled == true
                 } catch (_: SecurityException) {
-                    true
+                    log("BT: 无法读取蓝牙状态——请检查「附近的设备」权限")
+                    showBluetoothPermissionHelp()
+                    return@ensureWifiLocationReady
                 }
             if (!on) {
                 DarkMessageDialog.show(
@@ -394,8 +487,8 @@ class MainActivity : AppCompatActivity() {
     private val locationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("ACCESS_FINE_LOCATION 授权: $granted")
-            if (granted && pendingStartAfterLocationPermission.compareAndSet(true, false)) {
-                ensureShizukuReady { showAudioChoiceDialog() }
+            if (pendingStartAfterLocationPermission.getAndSet(false) && granted) {
+                prepareConnection()
             }
         }
 
@@ -589,25 +682,82 @@ class MainActivity : AppCompatActivity() {
                 return@runOnUiThread
             }
             ensureTouchServiceReady {
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
+                // 连接授权可能在弹出投屏或启动触控服务期间变化。
+                if (!hasBluetoothConnectPermission()) {
+                    requestBluetoothConnectPermission(BluetoothPermissionAction.START_CONNECTION)
+                    return@ensureTouchServiceReady
+                }
+                if (pendingCarVisibilityTarget != null || SessionController.isSessionRunning()) {
+                    return@ensureTouchServiceReady
+                }
+                if (!resources.getBoolean(R.bool.prefer_car_bluetooth_callback)) {
+                    startPreparedConnection()
+                    return@ensureTouchServiceReady
+                }
+                val target = requirePairedTrialTarget() ?: return@ensureTouchServiceReady
+                pendingCarVisibilityTarget = target.address
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) ==
                     PackageManager.PERMISSION_GRANTED
                 ) {
-                    permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                    requestCarVisibility()
+                } else {
+                    try {
+                        carVisibilityPermissionLauncher.launch(Manifest.permission.BLUETOOTH_ADVERTISE)
+                    } catch (_: RuntimeException) {
+                        finishCarVisibility("permission_unavailable")
+                    }
                 }
-                // 通知权限（API 33+）：前台服务通知可见；拒绝也不影响保活
-                if (Build.VERSION.SDK_INT >= 33 &&
-                    ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") !=
-                    PackageManager.PERMISSION_GRANTED
-                ) {
-                    permissionLauncher.launch("android.permission.POST_NOTIFICATIONS")
-                }
-                SessionController.startConnection(this)
             }
+        }
+    }
+
+    private fun requestCarVisibility() {
+        val bluetoothEnabled = try {
+            hasBluetoothConnectPermission() &&
+                getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
+        } catch (_: SecurityException) {
+            false
+        }
+        if (!bluetoothEnabled) {
+            finishCarVisibility("bluetooth_unavailable")
+            return
+        }
+        try {
+            carVisibilityLauncher.launch(
+                Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                    .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, CAR_VISIBILITY_SECONDS),
+            )
+        } catch (_: RuntimeException) {
+            finishCarVisibility("unavailable")
+        }
+    }
+
+    private fun finishCarVisibility(outcome: String) {
+        val address = pendingCarVisibilityTarget ?: return
+        pendingCarVisibilityTarget = null
+        if (isFinishing || isDestroyed || SessionController.isSessionRunning()) return
+        log("BT: 手机临时蓝牙可见性 $outcome")
+        val target = TargetDevicePrefs.get(this) ?: return
+        if (!TargetDevicePrefs.matches(target, address) || requirePairedTrialTarget() == null) return
+        startPreparedConnection()
+    }
+
+    private fun startPreparedConnection() {
+        SessionController.startConnection(this)
+        // Android 13+ 的通知权限与蓝牙授权分别处理。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingCarVisibilityTarget = savedInstanceState?.getString(KEY_PENDING_CAR_VISIBILITY_TARGET)
+        val savedBluetoothAction = savedInstanceState?.getString(KEY_BLUETOOTH_PERMISSION_ACTION)
+        pendingBluetoothPermissionAction = BluetoothPermissionAction.entries.firstOrNull { it.name == savedBluetoothAction }
         setContentView(R.layout.activity_main)
         findViewById<View>(R.id.btnCarShortcuts).setOnClickListener { io.github.shaonialife.cardeck.ui.CarShortcutDialog(this).open() }
         localLyricsImport = io.github.shaonialife.cardeck.ui.LocalLyricsImport(this, savedInstanceState)
@@ -882,7 +1032,7 @@ class MainActivity : AppCompatActivity() {
             when (heroState) {
                 HeroState.CONNECTED -> promptDisconnect()
                 // 前置检查：Shizuku（硬性依赖）→ 蓝牙权限/开关 → 音频选择
-                HeroState.IDLE -> ensureShizukuReady { ensureBluetoothReady { showAudioChoiceDialog() } }
+                HeroState.IDLE -> prepareConnection()
                 // 连接中可取消：卡在错误网络/等待回连时用户主动脱身（弹窗防误触）
                 HeroState.CONNECTING -> promptCancelConnecting()
                 null -> {}
@@ -1001,12 +1151,6 @@ class MainActivity : AppCompatActivity() {
         findViewById<ImageView>(R.id.btnExportLog).setOnLongClickListener {
             exportLogFile(LogExporter.Scope.ALL)
             true
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
         }
 
         // 通知使用权（媒体会话枚举，音乐卡数据源）：Shizuku 就绪时可静默授予。
@@ -1252,9 +1396,7 @@ class MainActivity : AppCompatActivity() {
         ) {
             ready++
         }
-        val btGranted =
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
-                PackageManager.PERMISSION_GRANTED
+        val btGranted = hasBluetoothConnectPermission()
         var bondedCount = -1
         if (btGranted) {
             try {
@@ -1269,8 +1411,14 @@ class MainActivity : AppCompatActivity() {
         if (bondedCount > 0) ready++
         if (CarPlayService.mediaProjection != null) ready++
 
-        btBadge.visibility = if (bondedCount >= 0) View.VISIBLE else View.GONE
-        if (bondedCount >= 0) {
+        btBadge.visibility = if (!btGranted || bondedCount >= 0) View.VISIBLE else View.GONE
+        btnPickTarget.visibility = btBadge.visibility
+        btnPickTarget.text = if (btGranted) "选择设备" else "授权"
+        if (!btGranted) {
+            btBadge.background.mutate().setTint(getColor(R.color.m3_amber))
+            btBadge.text = "待授权"
+            btDesc.text = "允许「附近的设备」后选择车机"
+        } else if (bondedCount >= 0) {
             val target = TargetDevicePrefs.get(this)
             if (bondedCount > 0) {
                 btBadge.background.mutate().setTint(getColor(R.color.m3_ok_dot))
@@ -1305,11 +1453,6 @@ class MainActivity : AppCompatActivity() {
                     btDesc.text = "目标「${target.name}」已不在配对列表——请重新选择设备"
                 }
             }
-            // 弹窗内可扫描并直接配对未配对设备，因此不再只在「已有配对」时显示：
-            // 一台都没配对时，这里正是用户的入口。
-            btnPickTarget.visibility = View.VISIBLE
-        } else {
-            btnPickTarget.visibility = View.GONE
         }
         val projectionReady =
             CarPlayService.mediaProjection != null
@@ -1394,6 +1537,10 @@ class MainActivity : AppCompatActivity() {
      * 选择立即生效（链路动态读取目标，无需重连）。
      */
     private fun showTargetPicker() {
+        if (!hasBluetoothConnectPermission()) {
+            requestBluetoothConnectPermission(BluetoothPermissionAction.PICK_TARGET)
+            return
+        }
         val adapter =
             try {
                 (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
@@ -2437,6 +2584,8 @@ class MainActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
         localLyricsImport.save(outState)
         outState.putLong(KEY_DISCLAIMER_DEADLINE, disclaimerDeadlineAt)
+        outState.putString(KEY_BLUETOOTH_PERMISSION_ACTION, pendingBluetoothPermissionAction?.name)
+        outState.putString(KEY_PENDING_CAR_VISIBILITY_TARGET, pendingCarVisibilityTarget)
     }
 
     /**

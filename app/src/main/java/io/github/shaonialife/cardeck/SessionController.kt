@@ -1,7 +1,10 @@
 package io.github.shaonialife.cardeck
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.view.KeyEvent
+import androidx.core.content.ContextCompat
 import io.github.shaonialife.cardeck.airplay.AirPlayClient
 import io.github.shaonialife.cardeck.airplay.BmwControlIapCompatibility
 import io.github.shaonialife.cardeck.airplay.BmwRequestUiRecoveryPolicy
@@ -565,7 +568,14 @@ object SessionController {
             appendLog("SHIZUKU: 触控服务未接通，已阻止启动；请在手机端重试准备")
             return
         }
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            appendLog("BT: 缺少「附近的设备」连接权限，已阻止启动")
+            return
+        }
         if (bluetoothClient?.isRunning != true) {
+            appendLog("BT: 已确认「附近的设备」连接权限")
             activeBluetoothCompatibility = BluetoothCompatibilityPrefs.get(context.applicationContext)
             appendLog(
                 "BT-C: 本次蓝牙策略=" +

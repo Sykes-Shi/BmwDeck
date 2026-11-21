@@ -41,9 +41,9 @@ android {
             signingConfig = if (hasReleaseKeystore) signingConfigs.getByName("release") else null
         }
         debug {
-            // The iDrive 6 field test can be installed alongside the center trial.
-            applicationIdSuffix = ".id6test"
-            versionNameSuffix = "-oneplus-id6-test2"
+            // The iDrive 7 field test can be installed alongside the public trial.
+            applicationIdSuffix = ".samsunghkid7test"
+            versionNameSuffix = "-samsung-hk-id7-test"
         }
     }
 
@@ -72,7 +72,7 @@ android {
 // Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(167) }
+        variant.outputs.forEach { output -> output.versionCode.set(168) }
     }
 }
 
