@@ -22,8 +22,23 @@ class BmwEarlyGreetingTest {
     }
 
     @Test
+    fun mgu86CarPlayReceivesReadyBeforeWifiEvenWithoutHidReply() {
+        runScenario(
+            earlyGreeting = true,
+            preferCtrlInvitation = false,
+            model = "MGU-86-BMW",
+            sendHid = false,
+        )
+    }
+
+    @Test
     fun otherBmwEaProtocolRetainsOriginalOrdering() {
         runScenario(earlyGreeting = false, eaName = "de.bmw.a4a.bt")
+    }
+
+    @Test
+    fun mgu86A4aDoesNotUseCarPlayGreetingOrder() {
+        runScenario(earlyGreeting = false, model = "MGU-86-BMW", eaName = "de.bmw.a4a.bt")
     }
 
     @Test
@@ -60,6 +75,7 @@ class BmwEarlyGreetingTest {
         eaName: String = "com.bmw.carplay",
         receivesWifi: Boolean = true,
         sendsWifi: Boolean = true,
+        sendHid: Boolean = true,
     ) {
         val pair = InMemoryStreamPair()
         val phone = Iap2LinkChannel(pair.sideA, name = "bmw-v3-phone")
@@ -99,8 +115,10 @@ class BmwEarlyGreetingTest {
                 // This receiver will not enable HID or send Wi-Fi until it has the whole greeting.
                 if (earlyGreeting) wire.expectGreeting()
                 if (earlyWifi) wire.sendWifi()
-                wire.send(Iap2MessageIds.START_HID, Iap2Csm.u16(0, 0))
-                wire.expect(Iap2MessageIds.DEVICE_HID_REPORT)
+                if (sendHid) {
+                    wire.send(Iap2MessageIds.START_HID, Iap2Csm.u16(0, 0))
+                    wire.expect(Iap2MessageIds.DEVICE_HID_REPORT)
+                }
                 if (legacyWifi && !earlyWifi) {
                     wire.expect(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
                     wire.sendWifi()

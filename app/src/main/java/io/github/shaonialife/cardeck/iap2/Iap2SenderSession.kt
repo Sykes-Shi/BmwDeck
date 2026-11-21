@@ -225,13 +225,16 @@ class Iap2SenderSession(
         if (bmwProbeCandidate && !bmwProbe) {
             log("EXPERIMENT: BMW 探测已达本次进程上限，跳过试探")
         }
+        val isBmwMgu86 =
+            identityParams[1]?.value?.asStringOrEmpty()?.equals("MGU-86-BMW", ignoreCase = true) == true &&
+                identityParams[2]?.value?.asStringOrEmpty()?.equals("BMW Group", ignoreCase = true) == true
         val bmwEarlyGreeting =
-            identityText.contains("bmw") && identityText.contains("mgu-50-p") &&
+            ((identityText.contains("bmw") && identityText.contains("mgu-50-p")) || isBmwMgu86) &&
                 eaProtocols.any { (_, name) -> name == "com.bmw.carplay" } &&
                 declaresReceiveWifi == true && declaresSendWifi == true
         if (bmwEarlyGreeting) {
-            // 仅验证实测 CarPlay 配置的时序：原顺序等热点时车机约 8s 断开，
-            // 状态问候尚未发出。提前同一组通知，不增加消息或重发。
+            // 实测 CarPlay 会话在状态问候发出前已断链（MGU-86 的热点请求收到链路 ACK，
+            // 但未收到热点配置）。提前同一组通知，仍只发送一次。
             log("EXPERIMENT v3: BMW CarPlay 配置——在 HID/WiFi 等待前发送一次设备状态问候")
             sendDeviceStateGreeting()
         }
@@ -263,7 +266,7 @@ class Iap2SenderSession(
             } else if (!legacyWifiExchange) {
                 log(
                     "iap2 车机未声明支持 0x5702/0x5703（收=${declaresReceiveWifi ?: "未知"} " +
-                        "发=${declaresSendWifi ?: "未知"}）——跳过旧协议，AP 信息由 0x4301 提供",
+                        "发=${declaresSendWifi ?: "未知"}）——跳过这组热点请求",
                 )
                 null
             } else {
@@ -272,11 +275,11 @@ class Iap2SenderSession(
                 val wifiDeadline = if (bmwProbe) minOf(deadline, System.nanoTime() + 1_500_000_000L) else deadline
                 val wifiConfiguration = expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, wifiDeadline)
                 if (wifiConfiguration == null) {
-                    if (channel.isAlive) {
-                        log("iap2 0x5703 未在窗口内到达——尝试 0x4300/0x4301（新版协议可能自带 AP 信息）")
-                    } else {
+                    if (!channel.isAlive) {
                         log("iap2 等待 0x5703 结束时蓝牙链路已关闭——未收到热点凭据")
+                        throw IOException("等待车机热点信息（0x5703）时蓝牙链路关闭")
                     }
+                    log("iap2 0x5703 未在窗口内到达——尝试 0x4300/0x4301（新版协议可能自带 AP 信息）")
                     null
                 } else {
                     val parsed = parseWifiConfiguration(wifiConfiguration)
@@ -735,7 +738,7 @@ class Iap2SenderSession(
         while (true) {
             val remaining = (hidWindowNanos - System.nanoTime()) / 1_000_000L
             if (remaining <= 0) {
-                log("iap2 未收到 0x6800（该接收端不发 StartHID，继续）")
+                log("iap2 当前窗口内未收到 0x6800 StartHID，继续")
                 return
             }
             // 诊断模式保留早到 0x4301；不能把刚保存的帧再从 pendingFrames 取回空转。

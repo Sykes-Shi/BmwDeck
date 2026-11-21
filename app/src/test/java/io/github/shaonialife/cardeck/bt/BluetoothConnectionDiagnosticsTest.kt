@@ -96,6 +96,10 @@ class BluetoothConnectionDiagnosticsTest {
     @Test fun errorsAreMappedWithoutReturningMessages() {
         assertEquals("service_discovery_failed", BluetoothConnectionDiagnostics.errorCategory(IOException("Service discovery failed for AA:BB:CC:DD:EE:FF")))
         assertEquals("read_failed_or_closed", BluetoothConnectionDiagnostics.errorCategory(IOException("read failed, socket might closed")))
+        assertEquals(
+            "read_failed_or_closed_or_timeout",
+            BluetoothConnectionDiagnostics.errorCategory(IOException("read failed, socket might closed or timeout, read ret: -1")),
+        )
         assertEquals("timeout", BluetoothConnectionDiagnostics.errorCategory(IOException("operation timed out")))
         assertEquals("permission", BluetoothConnectionDiagnostics.errorCategory(SecurityException("private details")))
         val category = BluetoothConnectionDiagnostics.errorCategory(IOException("private message"))

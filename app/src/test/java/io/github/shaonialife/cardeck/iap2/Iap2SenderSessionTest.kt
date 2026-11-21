@@ -106,6 +106,7 @@ class Iap2SenderSessionTest {
     @Test
     fun closedLinkWhileWaitingForWifiIsNotReportedAsTimeout() {
         val result = runBmwScenario(BmwResponse.CLOSE_WHILE_WAITING_WIFI)
+        assertEquals("等待车机热点信息（0x5703）时蓝牙链路关闭", result.failure?.message)
         assertTrue(result.events.any { it.contains("等待 0x5703 结束时蓝牙链路已关闭") })
         assertTrue(result.events.none { it.contains("0x5703 未在窗口内到达") })
         assertNotNull("The fixture must terminate the phone channel", result.millisAfterChannelClose)

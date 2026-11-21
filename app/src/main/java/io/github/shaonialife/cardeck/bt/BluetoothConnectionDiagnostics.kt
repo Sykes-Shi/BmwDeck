@@ -103,10 +103,13 @@ internal object BluetoothConnectionDiagnostics {
     fun errorCategory(error: Throwable): String {
         if (error is SecurityException) return "permission"
         val message = error.message.orEmpty().lowercase(java.util.Locale.ROOT)
+        val mentionsReadOrClose = "read failed" in message || "socket closed" in message || "socket might closed" in message
+        val mentionsTimeout = "timed out" in message || "timeout" in message
         return when {
             "service discovery failed" in message || "sdp failed" in message -> "service_discovery_failed"
-            "timed out" in message || "timeout" in message -> "timeout"
-            "read failed" in message || "socket closed" in message -> "read_failed_or_closed"
+            mentionsReadOrClose && mentionsTimeout -> "read_failed_or_closed_or_timeout"
+            mentionsTimeout -> "timeout"
+            mentionsReadOrClose -> "read_failed_or_closed"
             "permission" in message || "not allowed" in message -> "permission"
             else -> "other"
         }

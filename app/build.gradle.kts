@@ -43,7 +43,7 @@ android {
         debug {
             // Keep local developer builds separate from the public trial.
             applicationIdSuffix = ".dev"
-            versionNameSuffix = "-fold7-id85-test"
+            versionNameSuffix = "-fold7-id85-test2"
         }
     }
 
@@ -72,7 +72,7 @@ android {
 // Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(163) }
+        variant.outputs.forEach { output -> output.versionCode.set(164) }
     }
 }
 
