@@ -19,6 +19,7 @@ android {
         targetSdk = 34
         versionCode = 165
         versionName = "$appVersionName-v47-public"
+        manifestPlaceholders["cardeckAppLabel"] = "@string/app_name"
     }
 
     signingConfigs {
@@ -41,9 +42,10 @@ android {
             signingConfig = if (hasReleaseKeystore) signingConfigs.getByName("release") else null
         }
         debug {
-            // Keep local developer builds separate from the public trial.
-            applicationIdSuffix = ".dev"
-            versionNameSuffix = "-dev"
+            applicationIdSuffix = ".id6test"
+            versionNameSuffix = "-id6-controls"
+            resValue("string", "id6_trial_label", "CarDeck BMW ID6 测试")
+            manifestPlaceholders["cardeckAppLabel"] = "@string/id6_trial_label"
         }
     }
 
@@ -72,7 +74,10 @@ android {
 // Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(164) }
+        variant.outputs.forEach { output ->
+            output.versionCode.set(170)
+            output.versionName.set("$appVersionName-v47-center-id6-test")
+        }
     }
 }
 

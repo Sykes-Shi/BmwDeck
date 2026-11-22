@@ -374,7 +374,16 @@ class GridActivity : CarAppearanceActivity() {
             R.id.dashNext to TargetedMediaControls.Command.NEXT,
         ).forEach { (id, command) ->
             panel.findViewById<View>(id).apply {
-                isEnabled = !mediaCommandPending && MediaSessionsState.accessGranted && TargetedMediaControls.supported(now, command)
+                val supported = MediaSessionsState.accessGranted && TargetedMediaControls.supported(now, command)
+                val canChooseMusic = command == TargetedMediaControls.Command.PLAY_PAUSE && now?.playing != true
+                isEnabled = !mediaCommandPending && (supported || canChooseMusic)
+                if (command == TargetedMediaControls.Command.PLAY_PAUSE) {
+                    contentDescription = when {
+                        now?.playing == true -> "暂停"
+                        supported -> "播放"
+                        else -> "打开音乐应用选歌"
+                    }
+                }
                 alpha = if (isEnabled) 1f else 0.3f
             }
         }
@@ -399,8 +408,12 @@ class GridActivity : CarAppearanceActivity() {
     }
 
     private fun sendMediaCommand(command: TargetedMediaControls.Command) {
-        val expected = dashboardMediaSnapshot ?: return
         if (mediaCommandPending) return
+        val expected = dashboardMediaSnapshot
+        if (expected == null || !MediaSessionsState.accessGranted || !TargetedMediaControls.supported(expected, command)) {
+            if (command == TargetedMediaControls.Command.PLAY_PAUSE && expected?.playing != true) openCarPlayer(expected?.pkg)
+            return
+        }
         mediaCommandPending = true
         renderMediaCard()
         val ownerGrid = VirtualLauncher.gridDisplayId
@@ -421,8 +434,14 @@ class GridActivity : CarAppearanceActivity() {
         val ownerMap = VirtualLauncher.mapDisplayId
         Bg.run("dashboard-player") {
             if (!ownsGridAction(ownerGrid, ownerMap)) return@run
-            val ok = VirtualLauncher.launchCarMedia(packageName ?: CarMediaActivity.NETEASE_PACKAGE)
-            if (!ok) runOnUiThread { if (ownsGridAction(ownerGrid, ownerMap)) showDashboardFeedback("打开失败，请稍后重试") }
+            val target = packageName?.takeIf { packageManager.getLaunchIntentForPackage(it) != null }
+                ?: VirtualLauncher.preferredMusicPackage(applicationContext)
+            val ok = target != null && ownsGridAction(ownerGrid, ownerMap) && VirtualLauncher.launchCarMedia(target)
+            if (!ok) runOnUiThread {
+                if (ownsGridAction(ownerGrid, ownerMap)) showDashboardFeedback(
+                    if (target == null) "请在手机安装音乐应用" else "打开失败，请稍后重试",
+                )
+            }
         }
     }
 
@@ -442,6 +461,12 @@ class GridActivity : CarAppearanceActivity() {
             VirtualLauncher.dashboardMode && !VirtualLauncher.mapFullscreen && pager?.currentItem == 0
         if (!menuCurrent() || ownerGrid <= 0 || ownerMap <= 0 || display?.displayId != ownerGrid) return
         if (destinationDialog?.isShowing == true) return
+        if (VirtualLauncher.defaultMapComponent(this)?.packageName in AMAP_PACKAGES) {
+            if (!VirtualLauncher.submitDashboardDestination(BaiduDestination.NEW, ::live)) {
+                showDashboardFeedback("请在车机显示 CarDeck 首页时重试")
+            }
+            return
+        }
         val dialog = DashboardDestinationDialog(this, panel, ::menuCurrent) { destination ->
             if (menuCurrent() && !VirtualLauncher.submitDashboardDestination(destination, ::live)) {
                 showDashboardFeedback("请在车机显示 CarDeck 首页时重试")

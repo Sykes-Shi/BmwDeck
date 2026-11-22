@@ -33,7 +33,7 @@ internal class CarShortcutDialog(private val activity: AppCompatActivity) {
         }
         val keys = CarShortcut.values()
         val labels = mapOf(CarShortcut.MEDIA to "音乐", CarShortcut.MAP to "地图", CarShortcut.OPTION to "设置",
-            CarShortcut.NAV to "百度地图搜目的地")
+            CarShortcut.NAV to "搜目的地")
         val rows = keys.map { "${it.name} → ${labels.getValue(it)}" + if (it in learned) "　已校准" else "" } +
             listOf("检测方向盘拨号键", "检测旋钮明暗变化", "清除校准")
         dialogBuilder().setTitle("车机实体按键").setItems(rows.toTypedArray()) { _, index ->

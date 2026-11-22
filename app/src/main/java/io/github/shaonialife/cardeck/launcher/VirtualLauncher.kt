@@ -1670,13 +1670,7 @@ object VirtualLauncher {
                 val ctx = appContextRef ?: return@run
                 when (shortcut) {
                     CarShortcut.MEDIA -> {
-                        val states = ShortcutMusic.known.mapNotNull { pkg ->
-                            io.github.shaonialife.cardeck.media.MediaSessionsState.forPackage(pkg)?.let { pkg to it.playing }
-                        }.toMap()
-                        val target = ShortcutMusic.choose(
-                            io.github.shaonialife.cardeck.media.MediaSessionsState.nowPlaying?.pkg,
-                            states.filterValues { it }.keys, states.keys, lastShortcutMusic,
-                        ) { pkg -> ctx.packageManager.getLaunchIntentForPackage(pkg) != null }
+                        val target = preferredMusicPackage(ctx)
                         if (target != null) {
                             launchCarMedia(target, request.session, request.presentation) { shortcutCurrent(request) }
                         } else showShortcutNotice(request, "未找到可用的音乐应用")
@@ -1688,7 +1682,9 @@ object VirtualLauncher {
                     CarShortcut.OPTION -> openShortcutSettings(ctx, request)
                     CarShortcut.NAV -> {
                         if (request.session.phoneNavigation.enabled) showShortcutNotice(request, "手机导航中")
-                        else openBaiduDestination(ctx, request, destination)
+                        else if (destination == BaiduDestination.NEW && defaultMapComponent(ctx)?.packageName in AMAP_PACKAGES) {
+                            openShortcutMap(ctx, request, destinationSearch = true)
+                        } else openBaiduDestination(ctx, request, destination)
                     }
                 }
             } finally {
@@ -1698,9 +1694,9 @@ object VirtualLauncher {
         return true
     }
 
-    private fun openShortcutMap(ctx: Context, request: ShortcutRequest) {
+    private fun openShortcutMap(ctx: Context, request: ShortcutRequest, destinationSearch: Boolean = false) {
         val component = defaultMapComponent(ctx)
-        if (component == null || mapDisplayId <= 0) {
+        if (component == null || mapDisplayId <= 0 || (destinationSearch && component.packageName !in AMAP_PACKAGES)) {
             showShortcutNotice(request, "未找到可用的车机地图")
             return
         }
@@ -1728,6 +1724,17 @@ object VirtualLauncher {
             notifyRunningAppsChanged()
             logSink?.invoke("SHORTCUT: MAP display=$display existing=$existing")
             ProjectionAppMobileData.note(ctx, request.session.generation, component.packageName)
+            if (destinationSearch && current()) {
+                if (component.packageName == AMAP_MOBILE) {
+                    io.github.shaonialife.cardeck.SessionController.currentClient?.let { client ->
+                        destinationInput = DestinationInputTarget(display, request.session.generation,
+                            request.session.navigationRevision, request.presentation, client.controllerInputRevision, AMAP_MOBILE)
+                    }
+                    showShortcutNotice(request, "点高德搜索框，也可在手机 CarDeck 输入地名")
+                } else {
+                    showShortcutNotice(request, "点高德地图的搜索框输入目的地")
+                }
+            }
         }
     }
 
@@ -1826,14 +1833,29 @@ object VirtualLauncher {
 
     /** Called on a background thread after the user submits the phone keyboard. */
     internal fun searchFromPhone(target: DestinationInputTarget, text: String): Boolean {
-        val uri = baiduKeywordSearchUri(text) ?: return false
         val ctx = appContextRef ?: return false
-        fun current() = currentDestinationInput() === target
+        fun current() = currentDestinationInput() === target &&
+            (target.mapPackage != AMAP_MOBILE || defaultMapComponent(ctx)?.packageName == AMAP_MOBILE)
         return mapLaunchLock.withLock {
             if (!current()) return@withLock false
+            if (target.mapPackage == AMAP_MOBILE) return@withLock sendAmapSearch(target.display, text, ::current)
+            val uri = baiduKeywordSearchUri(text) ?: return@withLock false
             val foreground = currentBaiduPlacement(target.display).activity ?: return@withLock false
             sendBaiduPage(ctx, target.display, BaiduMapPage.DESTINATION, ::current, foreground.taskId, uri)
         }
+    }
+
+    private fun sendAmapSearch(display: Int, text: String, current: () -> Boolean): Boolean {
+        val uri = amapKeywordSearchUri(text) ?: return false
+        val task = taskIdsOnDisplayPkg(AMAP_MOBILE, display).singleOrNull()?.toIntOrNull()?.takeIf { it > 0 }
+            ?: return false
+        if (!current()) return false
+        val result = Shell.exec("am start -a android.intent.action.VIEW -d ${shellArgument(uri)} " +
+            "-p $AMAP_MOBILE --display $display --task $task 2>&1", timeoutMs = 8000)
+        val accepted = current() && result.ok && result.output.contains("Starting:", ignoreCase = true) &&
+            !result.output.contains("Error:", ignoreCase = true) && !result.output.contains("Exception", ignoreCase = true)
+        logSink?.invoke("MAP: 高德地点搜索 display=$display accepted=$accepted")
+        return accepted
     }
 
     internal fun observeDestinationKeyboard(display: Int) {
@@ -1896,6 +1918,16 @@ object VirtualLauncher {
             if (target.shortcutNotice === notice) target.shortcutNotice = null
         }, 1700)
         logSink?.invoke("SHORTCUT: notice=$text")
+    }
+
+    internal fun preferredMusicPackage(ctx: Context): String? {
+        val states = ShortcutMusic.known.mapNotNull { pkg ->
+            io.github.shaonialife.cardeck.media.MediaSessionsState.forPackage(pkg)?.let { pkg to it.playing }
+        }.toMap()
+        return ShortcutMusic.choose(
+            io.github.shaonialife.cardeck.media.MediaSessionsState.nowPlaying?.pkg,
+            states.filterValues { it }.keys, states.keys, lastShortcutMusic,
+        ) { pkg -> ctx.packageManager.getLaunchIntentForPackage(pkg) != null }
     }
 
     /** 车载播放页使用自有应用屏，第三方选歌仍走原 launchApp；不改变音频采集。 */

@@ -22,6 +22,8 @@ import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.input.ConsumerKeys
 import io.github.shaonialife.cardeck.input.BmwRotaryHid
+import io.github.shaonialife.cardeck.input.CompactCarHid
+import io.github.shaonialife.cardeck.input.CompactInputScreen
 import io.github.shaonialife.cardeck.input.BmwShortcutTarget
 import io.github.shaonialife.cardeck.input.BmwShortcutObservations
 import io.github.shaonialife.cardeck.input.PhoneBixby
@@ -2385,6 +2387,14 @@ object SessionController {
                             val rotaryDevices = setup.hidDescriptors.mapNotNull { (id, desc) ->
                                 BmwRotaryHid.fromDescriptor(desc)?.let { id to it }
                             }.toMap()
+                            val compactDevices = setup.hidDescriptors.mapNotNull { (id, descriptor) ->
+                                CompactCarHid.fromDescriptor(descriptor)?.let { id to it }
+                            }.toMap()
+                            val compactScreen = if (compactDevices.isNotEmpty() && !isBmw) CompactInputScreen() else null
+                            fun compactRevision(): Long? = if (compactScreen != null) compactScreen.revision
+                                else uiRecoveryClient.controllerInputRevision
+                            var compactEvents = 0
+                            appendLog("ID6-KEYS: descriptors=${setup.hidDescriptors.size} compact=${compactDevices.size}")
                             var rotaryEvents = 0
                             client.connectEventChannel(sessionKey, setup) { command ->
                                 val generation = VirtualLauncher.sessionGeneration()
@@ -2531,6 +2541,30 @@ object SessionController {
                                             }
                                             return@connectEventChannel
                                         }
+                                        val compact = compactDevices[uuid]
+                                        if (compact != null && report?.size == 2) {
+                                            val presses = compact.decode(report)
+                                            val revision = compactRevision()
+                                            fun live() = revision != null && compactRevision() == revision &&
+                                                currentClient === uiRecoveryClient && !uiRecoveryClient.cancelled &&
+                                                !connectCancelled && videoSender?.isRunning == true &&
+                                                VirtualLauncher.isCurrentSession(generation)
+                                            if (presses != null && live()) {
+                                                presses.navigation.forEach { CarControllerRouter.submit(it, ::live) }
+                                                presses.media.forEach { usage ->
+                                                    val key = if (usage == 0xcd) KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                                                        else ConsumerKeys.keyCodeFor(usage)
+                                                    if (key != 0 && live()) dispatchMediaKey(key)
+                                                }
+                                            }
+                                            if (presses == null || presses.navigation.isNotEmpty() || presses.media.isNotEmpty()) {
+                                                compactEvents++
+                                                if (compactEvents <= 32 || compactEvents % 100 == 0) {
+                                                    appendLog("ID6-KEYS: nav=${presses?.navigation} media=${presses?.media} active=${live()}")
+                                                }
+                                            }
+                                            return@connectEventChannel
+                                        }
                                         // 车机媒体键（Consumer Control）走 hidSendReport 通路，
                                         // 判定**以设备描述符为准**（不按 uuid、不按车机型号写死）：
                                         // 描述符声明了 Consumer 页(0x0C)的设备才当媒体键，报告字节是
@@ -2637,7 +2671,9 @@ object SessionController {
                                         if (liveSession) {
                                             // Revoke queued page opens as soon as a screen change arrives,
                                             // even if the control channel is still completing an earlier ACK.
-                                            val resources = (command["params"] as? Map<*, *>)?.get("resources") as? List<*>
+                                            val modeParams = command["params"] as? Map<*, *>
+                                            compactScreen?.observe(modeParams)
+                                            val resources = modeParams?.get("resources") as? List<*>
                                             if (resources == null || resources.any { ((it as? Map<*, *>)?.get("resourceID") as? Number)?.toLong() != 2L }) {
                                                 shortcutScreenChanges.incrementAndGet()
                                             }
@@ -2680,7 +2716,8 @@ object SessionController {
                                 }
                             }
                             // 资源声明（must）：真车对未声明资源的屏幕流 SETUP 直接 400
-                            client.assertModes()
+                            val initialModesAccepted = client.assertModes()
+                            compactScreen?.initialModes(initialModesAccepted)
                             // HID 输入模式武装：/info hidDevices（奥迪字符串 "0"/"1"，触摸="1"）。
                             // display features=0x08（高保真触摸）已声明，缺这步车机不发 hidSendReport。
                             setup.hidDeviceUuids.forEach { uuid ->

@@ -3,6 +3,8 @@ package io.github.shaonialife.cardeck.media
 import android.content.Context
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.os.SystemClock
+import android.view.KeyEvent
 
 /** 点击时重新核对包名和会话令牌；全局媒体键可能误操作另一个音源，故不作兜底。 */
 object TargetedMediaControls {
@@ -35,7 +37,18 @@ object TargetedMediaControls {
                 Command.PAUSE -> controller.transportControls.pause()
                 Command.PREVIOUS -> controller.transportControls.skipToPrevious()
                 Command.NEXT -> controller.transportControls.skipToNext()
-                Command.PLAY_PAUSE -> if (current.playing) controller.transportControls.pause() else controller.transportControls.play()
+                Command.PLAY_PAUSE -> {
+                    val explicit = if (current.playing) PlaybackState.ACTION_PAUSE else PlaybackState.ACTION_PLAY
+                    if (current.actions and explicit == 0L) {
+                        // The player exposed the toggle only. Deliver the key to this same token.
+                        val time = SystemClock.uptimeMillis()
+                        val key = KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                        val sent = controller.dispatchMediaButtonEvent(KeyEvent(time, time, KeyEvent.ACTION_DOWN, key, 0))
+                        controller.dispatchMediaButtonEvent(KeyEvent(time, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, key, 0))
+                        if (!sent) return false
+                    } else if (current.playing) controller.transportControls.pause()
+                    else controller.transportControls.play()
+                }
             }
             MediaSessionsState.requestResync()
             true
