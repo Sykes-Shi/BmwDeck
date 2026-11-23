@@ -24,6 +24,8 @@ import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import io.github.shaonialife.cardeck.iap2.ReceiverProfile
 import io.github.shaonialife.cardeck.input.ConsumerKeys
 import io.github.shaonialife.cardeck.input.BmwRotaryHid
+import io.github.shaonialife.cardeck.input.CompactCarHid
+import io.github.shaonialife.cardeck.input.CompactInputScreen
 import io.github.shaonialife.cardeck.input.BmwShortcutTarget
 import io.github.shaonialife.cardeck.input.BmwShortcutObservations
 import io.github.shaonialife.cardeck.input.PhoneBixby
@@ -2453,6 +2455,25 @@ object SessionController {
                             val rotaryDevices = setup.hidDescriptors.mapNotNull { (id, desc) ->
                                 BmwRotaryHid.fromDescriptor(desc)?.let { id to it }
                             }.toMap()
+                            val compactDevices = if (id6VideoTest) {
+                                setup.hidDescriptors.mapNotNull { (id, descriptor) ->
+                                    CompactCarHid.fromDescriptor(descriptor)?.let { id to it }
+                                }.toMap()
+                            } else emptyMap()
+                            val compactScreen = if (id6VideoTest && !isBmw &&
+                                (compactDevices.isNotEmpty() || rotaryDevices.isNotEmpty())
+                            ) CompactInputScreen() else null
+                            fun controlScreenRevision(): Long? = if (compactScreen != null) compactScreen.revision
+                                else uiRecoveryClient.controllerInputRevision
+                            var compactEvents = 0
+                            var unknownHidEvents = 0
+                            if (id6VideoTest) {
+                                appendLog(
+                                    "EVENT: HID setup declared=${setup.hidDeviceUuids.distinct().size}" +
+                                        " descriptors=${setup.hidDescriptors.size}" +
+                                        " compact=${compactDevices.size} rotary=${rotaryDevices.size}",
+                                )
+                            }
                             var rotaryEvents = 0
                             client.connectEventChannel(sessionKey, setup) { command ->
                                 val generation = VirtualLauncher.sessionGeneration()
@@ -2581,13 +2602,13 @@ object SessionController {
                                         val rotary = rotaryDevices[uuid]
                                         if (rotary != null && report != null) {
                                             val inputs = rotary.decode(report)
-                                            val revision = uiRecoveryClient.controllerInputRevision
+                                            val revision = controlScreenRevision()
                                             if (inputs != null && revision != null) {
                                                 inputs.forEach { input ->
                                                     CarControllerRouter.submit(input) {
                                                         currentClient === uiRecoveryClient && !uiRecoveryClient.cancelled &&
                                                             !connectCancelled && videoSender?.isRunning == true &&
-                                                            uiRecoveryClient.controllerInputRevision == revision
+                                                            VirtualLauncher.isCurrentSession(generation) && controlScreenRevision() == revision
                                                     }
                                                 }
                                             }
@@ -2595,6 +2616,32 @@ object SessionController {
                                                 rotaryEvents++
                                                 if (rotaryEvents <= 24 || rotaryEvents % 100 == 0) {
                                                     appendLog("ROTARY: report=${inputs ?: "invalid"} screenRevision=$revision")
+                                                }
+                                            }
+                                            return@connectEventChannel
+                                        }
+                                        val compact = compactDevices[uuid]
+                                        val presses = report?.let { compact?.decode(it) }
+                                        if (presses != null) {
+                                            val revision = controlScreenRevision()
+                                            fun live() = revision != null && controlScreenRevision() == revision &&
+                                                currentClient === uiRecoveryClient && !uiRecoveryClient.cancelled &&
+                                                !connectCancelled && videoSender?.isRunning == true &&
+                                                VirtualLauncher.isCurrentSession(generation)
+                                            if (live()) {
+                                                presses.navigation.forEach { CarControllerRouter.submit(it, ::live) }
+                                                presses.media.forEach { usage ->
+                                                    val key = if (usage == 0xcd) KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                                                        else ConsumerKeys.keyCodeFor(usage)
+                                                    if (key != 0 && live()) dispatchMediaKey(key)
+                                                }
+                                            }
+                                            if (presses.navigation.isNotEmpty() || presses.media.isNotEmpty()) {
+                                                compactEvents++
+                                                if (compactEvents <= 32 || compactEvents % 100 == 0) {
+                                                    appendLog(
+                                                        "EVENT: HID compact nav=${presses.navigation} media=${presses.media} active=${live()}",
+                                                    )
                                                 }
                                             }
                                             return@connectEventChannel
@@ -2607,8 +2654,8 @@ object SessionController {
                                         // DiPlay 的 knob(4B) 与 telephony(1B) 报告长度与媒体键重叠，
                                         // 只靠长度会误判（如 telephony usage 0xB3 会误发「快进」）。
                                         val descriptor = uuid?.let { setup.hidDescriptors[it] }
-                                        val keyMap =
-                                            descriptor?.let(ConsumerKeys::parseDescriptor)
+                                        // Do not reinterpret an unmatched report ID as a legacy media key.
+                                        val keyMap = descriptor?.takeIf { compact == null }?.let(ConsumerKeys::parseDescriptor)
                                         val rawValue =
                                             report
                                                 ?.takeIf { it.isNotEmpty() }
@@ -2628,7 +2675,8 @@ object SessionController {
                                                 // 描述符不可用时按报文长度回退——不依赖车机型号或 uuid
                                                 val touchFormat =
                                                     descriptor?.let(TouchReports::formatFromDescriptor)
-                                                TouchReports.parse(report, touchFormat)
+                                                if (compact != null && touchFormat == null) null
+                                                else TouchReports.parse(report, touchFormat)
                                             } else {
                                                 null
                                             }
@@ -2669,10 +2717,14 @@ object SessionController {
                                                 )
                                             }
                                         } else if (report != null) {
-                                            appendLog(
-                                                "EVENT: 其他 HID 报告 uuid=$uuid bytes=${report.size}" +
-                                                    " hex=${report.joinToString(" ") { "%02x".format(it) }}",
-                                            )
+                                            unknownHidEvents++
+                                            if (unknownHidEvents <= 24 || unknownHidEvents % 100 == 0) {
+                                                appendLog(
+                                                    "EVENT: HID unresolved bytes=${report.size}" +
+                                                        " descriptor=${descriptor != null} compactLayout=${compact != null}" +
+                                                        " screenOwned=${controlScreenRevision() != null} count=$unknownHidEvents",
+                                                )
+                                            }
                                         }
                                     }
 
@@ -2705,7 +2757,9 @@ object SessionController {
                                         if (liveSession) {
                                             // Revoke queued page opens as soon as a screen change arrives,
                                             // even if the control channel is still completing an earlier ACK.
-                                            val resources = (command["params"] as? Map<*, *>)?.get("resources") as? List<*>
+                                            val modeParams = command["params"] as? Map<*, *>
+                                            compactScreen?.observe(modeParams)
+                                            val resources = modeParams?.get("resources") as? List<*>
                                             if (resources == null || resources.any { ((it as? Map<*, *>)?.get("resourceID") as? Number)?.toLong() != 2L }) {
                                                 shortcutScreenChanges.incrementAndGet()
                                             }
@@ -2748,7 +2802,8 @@ object SessionController {
                                 }
                             }
                             // 资源声明（must）：真车对未声明资源的屏幕流 SETUP 直接 400
-                            client.assertModes()
+                            val initialModesAccepted = client.assertModes()
+                            compactScreen?.initialModes(initialModesAccepted)
                             // HID 输入模式武装：/info hidDevices（奥迪字符串 "0"/"1"，触摸="1"）。
                             // display features=0x08（高保真触摸）已声明，缺这步车机不发 hidSendReport。
                             setup.hidDeviceUuids.forEach { uuid ->
