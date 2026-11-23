@@ -224,6 +224,10 @@ object SessionController {
 
     /** WiFi 绑定互斥：auto-join 与端点交接两条路径可能同时绑定同一热点。 */
     private val wifiBindLock = Any()
+    // One screen setup per explicit connection in the ID6 test. Guarded by wifiBindLock.
+    private var id6VideoTestEpoch: WifiJoinOwnership.Epoch? = null
+
+    internal fun isId6VideoTest(context: Context): Boolean = context.resources.getBoolean(R.bool.id6_guarded_video_test)
     private val wifiJoins = WifiJoinOwnership()
     private val sessionAttempts = SessionAttemptOwnership<android.net.Network>()
     // 端点处理可能等待入网锁；必须离开 BT reader，保活泵才能继续接收控制消息。
@@ -468,6 +472,10 @@ object SessionController {
                         // Connector 已在后台投递；与新网络发布共锁，旧失联通知不能清掉新发现器。
                         synchronized(wifiBindLock) {
                             if (connectCancelled || !connector.isCurrentLoss(loss)) return@synchronized
+                            val testEpoch = id6VideoTestEpoch
+                            if (testEpoch != null && endId6VideoTest(context, testEpoch, "车机 Wi-Fi 中断")) {
+                                return@synchronized
+                            }
                             // 失联后 RECORD 的迟到成功不能再发布编码器/虚拟屏；只退役该网络的会话。
                             if (sessionAttempts.lose(loss.network) != null) {
                                 appendLog("AIRPLAY: 车机网络失联——取消所属配对和推流，等待下一轮连接")
@@ -634,7 +642,17 @@ object SessionController {
     }
 
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
-    fun disconnect(context: Context) {
+    fun disconnect(context: Context) = stopConnection(context)
+
+    // Called with wifiBindLock held, so an old failure cannot stop a newer media attempt.
+    private fun endId6VideoTest(context: Context, epoch: WifiJoinOwnership.Epoch, reason: String): Boolean {
+        if (connectCancelled || id6VideoTestEpoch !== epoch || !wifiJoins.isCurrent(epoch)) return false
+        id6VideoTestEpoch = null
+        stopConnection(context, "ID6 画面测试已停止（$reason），已暂停自动重连")
+        return true
+    }
+
+    private fun stopConnection(context: Context, mediaStopMessage: String? = null) {
         // 先淘汰队列和等锁中的旧端点；迅速重连把 connectCancelled 复位也不能复活它们。
         connectCancelled = true
         wifiJoins.cancel()
@@ -642,6 +660,10 @@ object SessionController {
         stopVpnCoexistence()
         val hadProjection = CarPlayService.mediaProjection != null
         pendingEndpointUpdate = null
+        if (mediaStopMessage != null) {
+            bluetoothServer?.stop()
+            bluetoothClient?.stop()
+        }
         retireSession()
         // BT 控制会话只在这里（用户终态）退役，socket close 让保活读循环立刻退出：
         // 否则它阻塞到对端超时（实测 ~24s）才结束，用户取消后英雄卡持续转圈。
@@ -651,13 +673,18 @@ object SessionController {
         phaseHint = null
         CarPlayService
             .stop(context)
-        bluetoothServer?.stop()
-        bluetoothClient?.stop()
+        if (mediaStopMessage == null) {
+            bluetoothServer?.stop()
+            bluetoothClient?.stop()
+        }
         ctrlAdvertiser?.stop()
         endpointBrowser?.stop()
         wifiConnector?.release()
         boundCarSsid = null
-        if (hadProjection) {
+        if (mediaStopMessage != null) {
+            appendLog("ID6-VIDEO: $mediaStopMessage")
+            uiHintSink?.invoke(mediaStopMessage)
+        } else if (hadProjection) {
             // Android 14+：MediaProjection 与保活服务（mediaProjection FGS 类型）绑定，
             // 停服务会连带失效授权——下次连接需重新点「申请投屏权限」
             appendLog("已手动断开并停止保活服务（常亮已恢复）；投屏授权已随服务停止失效，下次连接如需声音请重新申请")
@@ -725,6 +752,7 @@ object SessionController {
     /** 会话已建立且投影就绪、但音频尚未启动时，动态补启（投影授权晚于连接的场景）。 */
     @Synchronized
     fun maybeStartAudioNow(context: Context) {
+        if (isId6VideoTest(context)) return
         val client =
             currentClient ?: run {
                 appendLog("MODE: 投屏已就绪（当前无会话——下次连接时自动启用音频）")
@@ -1546,6 +1574,7 @@ object SessionController {
         sharedSecret: ByteArray?,
         host: String?,
     ): Boolean {
+        if (isId6VideoTest(context)) return false
         fun isLiveSession(): Boolean =
             currentClient === client && !client.cancelled && !connectCancelled && videoSender?.isRunning == true
 
@@ -2068,7 +2097,9 @@ object SessionController {
             appendLog(">>> [$source] 会话推流中——忽略冗余端点（接收端周期重连的重复 0x4301）")
             return
         }
+        val id6VideoTest = isId6VideoTest(context)
         val attempt = synchronized(wifiBindLock) {
+            if (id6VideoTest && id6VideoTestEpoch === wifiEpoch) return
             if (!connectCancelled && isCurrent() && videoSender?.isRunning != true && sessionStarting.compareAndSet(false, true)) {
                 pendingEndpointUpdate = null
                 sessionAttempts.begin()
@@ -2723,8 +2754,16 @@ object SessionController {
                             setup.hidDeviceUuids.forEach { uuid ->
                                 client.sendHidSetInputMode(uuid, mode = 0)
                             }
+                            if (id6VideoTest) {
+                                synchronized(wifiBindLock) {
+                                    requireAttempt()
+                                    id6VideoTestEpoch = wifiEpoch
+                                }
+                                appendLog("ID6-VIDEO: 媒体测试开始（仅视频，失败时暂停自动重连）")
+                            }
                             val screen = client.runScreenStream(sessionKey, setup.displayUuid)
                             requireAttempt()
+                            if (id6VideoTest && screen == null) error("车机未建立主屏流")
                             if (screen != null) {
                                 // 地址取 client 真正连通的那个（配对期间可能被 mDNS 刷新过）：
                                 // 视频数据端口与 keepAlive 都按它建 socket；IPv6 端点也算
@@ -2826,6 +2865,10 @@ object SessionController {
                                                 synchronized(wifiBindLock) {
                                                     if (connectCancelled || client.cancelled || !sessionAttempts.active(attempt) ||
                                                         currentClient !== client || videoSender !== sessionVideoSender) return@ended
+                                                    if (id6VideoTest) {
+                                                        endId6VideoTest(context, wifiEpoch, "视频流中断")
+                                                        return@ended
+                                                    }
                                                     // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                     appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
                                                     appContext?.let { io.github.shaonialife.cardeck.net.ProjectionAppMobileData.stop(it, VirtualLauncher.sessionGeneration()) }
@@ -2851,7 +2894,7 @@ object SessionController {
                                     synchronized(wifiBindLock) {
                                         requireAttempt()
                                         videoSender = sessionVideoSender
-                                        if (isBmw && receiverAtStart != null) {
+                                        if (!id6VideoTest && isBmw && receiverAtStart != null) {
                                             reconnectBorrowedScreen = reconnect@{ old, revision ->
                                                 synchronized(wifiBindLock) {
                                                     if (old !== uiRecoveryClient || currentClient !== old || connectCancelled ||
@@ -2869,7 +2912,10 @@ object SessionController {
                                         }
                                     }
                                     // 先连端口（车机看门狗），编码器等 RECORD 后再启动
-                                    sessionVideoSender?.openDataPort()
+                                    val dataPortOpen = sessionVideoSender?.openDataPort() == true
+                                    if (id6VideoTest && !dataPortOpen) error("主屏数据端口未连通")
+                                } else if (id6VideoTest) {
+                                    error("缺少用于主屏数据端口的车机地址")
                                 }
                                 // 先 RECORD 激活会话并起视频，再协商音频（2026-10-17 奥迪定谳）：
                                 // 车机在「屏幕流 SETUP 之后」有约 2s 看门狗，等不到 RECORD/数据流即
@@ -2887,7 +2933,7 @@ object SessionController {
                                     val videoDensity = pendingVideoDensity
                                     synchronized(wifiBindLock) {
                                         requireAttempt()
-                                        sessionVideoSender?.start { surface ->
+                                        val videoStarted = sessionVideoSender?.start { surface ->
                                             requireAttempt()
                                             // 唯一模式：隐形屏（双屏启动器：dock + 应用屏）
                                             val source =
@@ -2907,6 +2953,7 @@ object SessionController {
                                             appendLog(
                                                 "MODE: 隐形屏 ${if (ok) "已启动（高德车机版优先）display=${source.displayId}" else "启动失败（Shizuku 就绪？）"}",
                                             )
+                                            if (id6VideoTest && !ok) error("车机画面源未启动")
                                             // 暗幕/常亮只在真正开始投屏后生效（见 ScreenDimmer.sessionActive）：
                                             // 应用启动时只挂触摸探针，避免「会话早断了、手机过一会儿还是变暗」。
                                             requireAttempt()
@@ -2915,11 +2962,14 @@ object SessionController {
                                                 ScreenDimmer.setSessionActive(true)
                                             }
                                         }
+                                        if (id6VideoTest && videoStarted != true) error("视频编码未启动")
                                     }
                                 }
                                 // 音频通道内部统一 SETUP → RECORD → 捕获/同步，失败保留视频。
-                                requireAttempt()
-                                startAudioChannel(context, client, sessionKey, host)
+                                if (!id6VideoTest) {
+                                    requireAttempt()
+                                    startAudioChannel(context, client, sessionKey, host)
+                                }
                             }
                         } else {
                             // 会话级 SETUP 被拒（典型：接收端按设备过滤回 403，见
@@ -2940,8 +2990,11 @@ object SessionController {
                         // 旧 worker 的迟到 finally 不得释放新一轮门闸或清理新虚拟屏。
                         if (sessionAttempts.owns(attempt)) {
                             if (!sessionAttempts.matches(attempt, wifiConnector?.currentNetwork) || videoSender?.isRunning != true) {
-                                sessionAttempts.cancel()
-                                retireSessionResources()
+                                val stopped = id6VideoTest && endId6VideoTest(context, wifiEpoch, "视频未持续启动")
+                                if (!stopped) {
+                                    sessionAttempts.cancel()
+                                    retireSessionResources()
+                                }
                             }
                             finishStart()
                             // 配对未成功建立推流（fail/异常/start 失败提前退出）时解除静默降噪，

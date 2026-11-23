@@ -43,7 +43,7 @@ android {
         debug {
             // The iDrive 6 field test can be installed alongside the center trial.
             applicationIdSuffix = ".id6test"
-            versionNameSuffix = "-oneplus-id6-test2"
+            versionNameSuffix = "-oneplus-id6-video-test"
         }
     }
 
@@ -72,7 +72,7 @@ android {
 // Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(167) }
+        variant.outputs.forEach { output -> output.versionCode.set(168) }
     }
 }
 

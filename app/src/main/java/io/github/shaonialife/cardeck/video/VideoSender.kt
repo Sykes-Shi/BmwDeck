@@ -133,14 +133,15 @@ class VideoSender(
     fun openDataPort(): Boolean {
         val existing = socket
         if (existing != null && !existing.isClosed) return true
+        val client = Socket()
         return try {
-            val client = Socket()
             client.connect(InetSocketAddress(host, dataPort), 5_000)
             client.tcpNoDelay = true
             socket = client
             log("VIDEO: 数据端口已连通 $host:$dataPort（等 RECORD 后启动编码器）")
             true
         } catch (error: Exception) {
+            runCatching { client.close() }
             log("VIDEO: 数据端口连接失败 - ${error.message}")
             false
         }
@@ -240,9 +241,9 @@ class VideoSender(
 
     private fun drainEncoder() {
         val codec = encoder ?: return
-        val output = socket?.getOutputStream() ?: return
         val bufferInfo = MediaCodec.BufferInfo()
         try {
+            val output = socket?.getOutputStream() ?: return
             while (running.get()) {
                 maybeLogTransportDiagnostics()
                 val index =
@@ -276,7 +277,7 @@ class VideoSender(
         } catch (error: Exception) {
             // 视频数据口断开（如接收端屏幕关闭收摊会话）：只终止推流，绝不冒泡——
             // 后台线程未捕获异常会杀死整个进程（曾导致锁屏后 app 消失）
-            log("VIDEO: 推流中止 - ${error.message}（等待接收端恢复后重连）")
+            if (running.get()) log("VIDEO: 推流中止 - ${error.message}")
         } finally {
             stop()
             // 会话真实结束信号（静默降噪解除 / 状态收尾）

@@ -245,6 +245,10 @@ class MainActivity : AppCompatActivity() {
      * 统一使用已实测的系统输出采音，仍由用户选择本次是否开启车机声音。
      */
     private fun showAudioChoiceDialog() {
+        if (SessionController.isId6VideoTest(this)) {
+            beginWithAudio(enabled = false)
+            return
+        }
         // 明示系统混音范围，保留本次授权及撤销门控；不自动开启声音。
         // 横屏省略「取消」，仍可用返回键或点击弹窗外关闭。
         val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
