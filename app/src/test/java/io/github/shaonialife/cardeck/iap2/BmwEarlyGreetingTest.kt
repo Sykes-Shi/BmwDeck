@@ -17,6 +17,31 @@ class BmwEarlyGreetingTest {
     }
 
     @Test
+    fun mgu35TrialSendsReadyBeforeAskingForWifi() {
+        runScenario(
+            earlyGreeting = true,
+            preferCtrlInvitation = false,
+            model = "MGU-35-P",
+            enableMgu35EarlyStatusTrial = true,
+        )
+    }
+
+    @Test
+    fun mgu35WithoutTrialKeepsTheOriginalOrdering() {
+        runScenario(earlyGreeting = false, model = "MGU-35-P")
+    }
+
+    @Test
+    fun earlyStatusTrialRequiresTheReceiverToDeclareIt() {
+        runScenario(
+            earlyGreeting = false,
+            model = "MGU-35-P",
+            receivesCarPlayStatus = false,
+            enableMgu35EarlyStatusTrial = true,
+        )
+    }
+
+    @Test
     fun carPlayWifiArrivingDuringHidIsDeliveredWithoutAnotherRequest() {
         runScenario(earlyGreeting = true, earlyWifi = true)
     }
@@ -60,6 +85,8 @@ class BmwEarlyGreetingTest {
         eaName: String = "com.bmw.carplay",
         receivesWifi: Boolean = true,
         sendsWifi: Boolean = true,
+        receivesCarPlayStatus: Boolean = true,
+        enableMgu35EarlyStatusTrial: Boolean = false,
     ) {
         val pair = InMemoryStreamPair()
         val phone = Iap2LinkChannel(pair.sideA, name = "bmw-v3-phone")
@@ -77,7 +104,8 @@ class BmwEarlyGreetingTest {
                 val sendIds = mutableListOf(Iap2MessageIds.START_HID)
                 if (sendsWifi) sendIds += Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION
                 if (!legacyWifi) sendIds += Iap2MessageIds.CARPLAY_START_SESSION
-                val receiveIds = mutableListOf(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE)
+                val receiveIds = mutableListOf<Int>()
+                if (receivesCarPlayStatus) receiveIds += Iap2MessageIds.WIRELESS_CARPLAY_UPDATE
                 if (receivesWifi) receiveIds += Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION
                 wire.send(
                     Iap2MessageIds.IDENTIFICATION_INFORMATION,
@@ -130,6 +158,7 @@ class BmwEarlyGreetingTest {
                     callbacks.incrementAndGet()
                 },
                 bmwProbeAttempts = budget,
+                enableMgu35EarlyStatusTrial = enableMgu35EarlyStatusTrial,
             ).run(5_000)
             receiverThread.join(1_000)
             assertTrue("The mock receiver must complete the expected sequence", !receiverThread.isAlive)

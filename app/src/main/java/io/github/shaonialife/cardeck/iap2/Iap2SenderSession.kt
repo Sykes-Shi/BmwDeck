@@ -48,6 +48,7 @@ class Iap2SenderSession(
     private val context: android.content.Context? = null,
     /** Limit diagnostic probes across all reconnects in the current app process. */
     private val bmwProbeAttempts: AtomicInteger = sharedBmwProbeAttempts,
+    private val enableMgu35EarlyStatusTrial: Boolean = false,
 ) {
     /** 从 0x5703 + 0x4301 解析出的接收端信息。 */
     data class CarPlayEndpoint(
@@ -175,7 +176,7 @@ class Iap2SenderSession(
         send(Iap2MessageIds.START_IDENTIFICATION)
         val identification = expect(Iap2MessageIds.IDENTIFICATION_INFORMATION, deadline)
         val identityParams = Iap2Csm.parseParams(identification.body).associateBy { it.id }
-        logIdentification(identification.body, identityParams)
+        logIdentification(identityParams)
         send(Iap2MessageIds.IDENTIFICATION_ACCEPTED)
         log("iap2 tx=0x1d02 identification-accepted")
 
@@ -225,13 +226,17 @@ class Iap2SenderSession(
         if (bmwProbeCandidate && !bmwProbe) {
             log("EXPERIMENT: BMW 探测已达本次进程上限，跳过试探")
         }
+        val mgu35EarlyStatusTrial = enableMgu35EarlyStatusTrial &&
+            identityParams[1]?.value?.asStringOrEmpty()?.equals("MGU-35-P", ignoreCase = true) == true &&
+            identityParams[2]?.value?.asStringOrEmpty()?.equals("BMW Group", ignoreCase = true) == true &&
+            accessoryDeclaresReceive(Iap2MessageIds.WIRELESS_CARPLAY_UPDATE) == true
         val bmwEarlyGreeting =
-            identityText.contains("bmw") && identityText.contains("mgu-50-p") &&
+            ((identityText.contains("bmw") && identityText.contains("mgu-50-p")) || mgu35EarlyStatusTrial) &&
                 eaProtocols.any { (_, name) -> name == "com.bmw.carplay" } &&
                 declaresReceiveWifi == true && declaresSendWifi == true
         if (bmwEarlyGreeting) {
-            // 仅验证实测 CarPlay 配置的时序：原顺序等热点时车机约 8s 断开，
-            // 状态问候尚未发出。提前同一组通知，不增加消息或重发。
+            // MGU-35-P 现场只确认收到热点请求，关闭链路前还没有收到这组状态通知。
+            // 复用 MGU-50-P 已验证过的顺序，每轮仍只发送一次。
             log("EXPERIMENT v3: BMW CarPlay 配置——在 HID/WiFi 等待前发送一次设备状态问候")
             sendDeviceStateGreeting()
         }
@@ -268,13 +273,20 @@ class Iap2SenderSession(
                 null
             } else {
                 if (bmwProbe) log("EXPERIMENT: BMW 旧协议探测 0x5702（本次进程最多 2 次），等待响应 1.5s")
+                val wifiRequestStarted = System.nanoTime()
                 send(Iap2MessageIds.REQUEST_ACCESSORY_WIFI_CONFIGURATION)
                 val wifiDeadline = if (bmwProbe) minOf(deadline, System.nanoTime() + 1_500_000_000L) else deadline
                 val wifiConfiguration = expectOrNull(Iap2MessageIds.ACCESSORY_WIFI_CONFIGURATION, wifiDeadline)
+                val wifiWaitMs = (System.nanoTime() - wifiRequestStarted) / 1_000_000
                 if (wifiConfiguration == null) {
-                    log("iap2 0x5703 未在窗口内到达——改走 0x4300/0x4301（新版协议自带 AP 信息）")
+                    if (!channel.isAlive) {
+                        log("iap2 热点配置 result=link_closed elapsedMs=$wifiWaitMs")
+                        throw IOException("等待车机热点信息（0x5703）时蓝牙链路关闭")
+                    }
+                    log("iap2 热点配置 result=timeout elapsedMs=$wifiWaitMs，尝试后续会话流程")
                     null
                 } else {
+                    log("iap2 热点配置 result=received elapsedMs=$wifiWaitMs")
                     val parsed = parseWifiConfiguration(wifiConfiguration)
                     if ((bmwProbe || bmwEarlyGreeting) && parsed.ssid.isEmpty()) {
                         throw IOException("本次收到 0x5703，但未取得有效车机热点 SSID")
@@ -731,7 +743,7 @@ class Iap2SenderSession(
         while (true) {
             val remaining = (hidWindowNanos - System.nanoTime()) / 1_000_000L
             if (remaining <= 0) {
-                log("iap2 未收到 0x6800（该接收端不发 StartHID，继续）")
+                log("iap2 当前窗口内未收到 0x6800 StartHID，继续")
                 return
             }
             // 诊断模式保留早到 0x4301；不能把刚保存的帧再从 pendingFrames 取回空转。
@@ -944,7 +956,7 @@ class Iap2SenderSession(
         return out
     }
 
-    private fun logIdentification(rawBody: ByteArray, params: Map<Int, Iap2Csm.Param>) {
+    private fun logIdentification(params: Map<Int, Iap2Csm.Param>) {
         val name = params[0]?.value?.asStringOrEmpty()
         val model = params[1]?.value?.asStringOrEmpty()
         val manufacturer = params[2]?.value?.asStringOrEmpty()
@@ -1000,7 +1012,6 @@ class Iap2SenderSession(
                     ),
             )
         }
-        log("iap2 0x1d01 原始体=" + rawBody.joinToString("") { "%02x".format(it) })
     }
 
     private fun remainingMillis(deadlineNanos: Long): Long {

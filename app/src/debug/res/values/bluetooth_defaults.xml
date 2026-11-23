@@ -1,4 +1,5 @@
 <resources>
     <bool name="keep_system_bluetooth_default">true</bool>
     <bool name="prefer_car_bluetooth_callback">true</bool>
+    <bool name="mgu35_early_carplay_status_trial">true</bool>
 </resources>

@@ -1,6 +1,7 @@
 package io.github.shaonialife.cardeck.bt
 
 import android.content.Context
+import io.github.shaonialife.cardeck.R
 import io.github.shaonialife.cardeck.iap2.Iap2SenderSession
 import io.github.shaonialife.cardeck.transport.Iap2LinkChannel
 import io.github.shaonialife.cardeck.util.DeviceIdentity
@@ -28,6 +29,7 @@ internal fun Iap2LinkChannel.runSenderSession(
             onEndpointUpdate,
             // MFi 挑战长度按车机身份持久化（省掉 20B 静默 6 秒的试探）
             context.applicationContext,
+            enableMgu35EarlyStatusTrial = context.resources.getBoolean(R.bool.mgu35_early_carplay_status_trial),
         )
     val endpoint = session.run(timeoutMillis)
     onEndpoint(endpoint)

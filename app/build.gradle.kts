@@ -43,7 +43,7 @@ android {
         debug {
             // The iDrive 7 field test can be installed alongside the public trial.
             applicationIdSuffix = ".samsunghkid7test"
-            versionNameSuffix = "-samsung-hk-id7-test"
+            versionNameSuffix = "-samsung-hk-id7-test2"
         }
     }
 
@@ -72,7 +72,7 @@ android {
 // Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(168) }
+        variant.outputs.forEach { output -> output.versionCode.set(169) }
     }
 }
 

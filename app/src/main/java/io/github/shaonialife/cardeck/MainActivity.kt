@@ -1049,6 +1049,11 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<TextView>(R.id.btnWifi).setOnClickListener {
             val ssid = ssidInput.text.toString().trim()
+            if (ssid.isEmpty()) {
+                snack("尚未收到车机热点信息，请先在车机上确认 Apple CarPlay")
+                log("WiFi: 热点名称为空，等待车机提供热点信息")
+                return@setOnClickListener
+            }
             // 自动加入不可用时的手动兜底：密码先进剪贴板，系统 WLAN 页粘贴即可
             val psk = SessionController.lastWifiPsk
             if (psk != null) {
