@@ -75,12 +75,11 @@ class Iap2BluetoothServer(
             return false
         }
         return try {
-            serverSocket.set(
-                adapter.listenUsingRfcommWithServiceRecord(SDP_NAME, IPHONE_IAP2_UUID),
-            )
+            val listener = adapter.listenUsingRfcommWithServiceRecord(SDP_NAME, IPHONE_IAP2_UUID)
+            serverSocket.set(listener)
             running = true
             log("BT: 监听 $SDP_NAME，等待接收端回连…")
-            Thread(::acceptLoop, "iap2-bt-accept").apply {
+            Thread({ acceptLoop(listener) }, "iap2-bt-accept").apply {
                 isDaemon = true
                 start()
             }
@@ -92,15 +91,19 @@ class Iap2BluetoothServer(
     }
 
     @SuppressLint("MissingPermission")
-    private fun acceptLoop() {
-        while (running) {
+    private fun acceptLoop(listener: BluetoothServerSocket) {
+        while (serverSocket.get() === listener) {
             val socket: BluetoothSocket =
                 try {
-                    serverSocket.get()?.accept() ?: break
+                    listener.accept()
                 } catch (error: IOException) {
-                    if (running) log("BT: accept 失败 - ${error.message}")
+                    if (serverSocket.get() === listener) log("BT: accept 失败 - ${error.message}")
                     break
                 }
+            if (serverSocket.get() !== listener) {
+                runCatching { socket.close() }
+                break
+            }
             val peerName =
                 try {
                     socket.remoteDevice?.name

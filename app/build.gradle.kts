@@ -43,7 +43,7 @@ android {
         debug {
             // Keep local developer builds separate from the public trial.
             applicationIdSuffix = ".dev"
-            versionNameSuffix = "-iqoo-id7-callback-test"
+            versionNameSuffix = "-iqoo-id7-first-pair-test"
         }
     }
 
@@ -72,7 +72,7 @@ android {
 // Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(164) }
+        variant.outputs.forEach { output -> output.versionCode.set(165) }
     }
 }
 

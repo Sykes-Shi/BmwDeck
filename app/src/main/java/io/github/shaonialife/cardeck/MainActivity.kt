@@ -1423,6 +1423,8 @@ class MainActivity : AppCompatActivity() {
 
     /** 扫描期间点过「配对」的设备地址（配对完成后自动选中为目标）。 */
     private var pendingBondAddress: String? = null
+    private var guidedBond: TargetDevicePrefs.Target? = null
+    private var guidedBondTimeout: Runnable? = null
 
     private data class TargetPickerEntry(
         val address: String,
@@ -1484,6 +1486,7 @@ class MainActivity : AppCompatActivity() {
         view.findViewById<TextView>(R.id.btnRescan).setOnClickListener { startTargetScan(dialog) }
         renderBondedGroup(view)
         dialog.setOnDismissListener {
+            cancelGuidedBond()
             stopTargetScan()
             targetPicker = null
             pendingBondAddress = null
@@ -1589,6 +1592,10 @@ class MainActivity : AppCompatActivity() {
      * 发现结果按地址去重、排除已配对设备（它们在上一组）；点「配对」调 createBond()。
      */
     private fun startTargetScan(dialog: androidx.appcompat.app.AlertDialog) {
+        if (guidedBond != null) {
+            pickerNotice("请先在手机和车机上完成本次蓝牙配对")
+            return
+        }
         val adapter =
             try {
                 (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
@@ -1690,7 +1697,7 @@ class MainActivity : AppCompatActivity() {
             inflateTargetRow(
                 name = name,
                 address = "$address · ${rssi}dBm",
-                action = "配对",
+                action = if (SessionController.supportsCarPlayFirstPairing(this)) "配对并连接" else "配对",
                 highlighted = false,
                 iconTint = R.color.m3_amber,
             ) {
@@ -1701,6 +1708,7 @@ class MainActivity : AppCompatActivity() {
 
     /** 点击未配对设备：先停扫描（扫描期间配对易失败），再 createBond()。 */
     private fun beginBond(device: BluetoothDevice) {
+        if (pendingBondAddress != null) return
         val address =
             try {
                 device.address
@@ -1708,8 +1716,31 @@ class MainActivity : AppCompatActivity() {
                 return
             }
         stopDiscoveryOnly()
-        pendingBondAddress = address
         val name = deviceDisplayName(device)
+        if (SessionController.supportsCarPlayFirstPairing(this)) {
+            if (SessionController.isSessionRunning() || SessionController.sessionStarting.get()) {
+                pickerNotice("请先取消当前连接，再重新配对")
+                return
+            }
+            if (ShizukuGate.state(this) != ShizukuGate.State.READY || !CarInputClient.isReady()) {
+                pickerNotice("先在连接准备中启动 Shizuku 和触控服务")
+                return
+            }
+            val target = TargetDevicePrefs.Target(address, name)
+            if (!SessionController.startFirstCarPlayPairing(this, target)) {
+                pickerNotice("CarPlay 蓝牙监听启动失败，请检查蓝牙并重试")
+                return
+            }
+            guidedBond = target
+            targetPicker?.window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            guidedBondTimeout = Runnable {
+                if (guidedBond !== target) return@Runnable
+                cancelGuidedBond()
+                log("BT-PAIR: 首次配对确认超时，已停止本次等待")
+                pickerNotice("未收到配对确认，请重新从车机 Apple CarPlay 页面尝试")
+            }.also { mainHandler.postDelayed(it, 90_000L) }
+        }
+        pendingBondAddress = address
         val ok =
             try {
                 device.createBond()
@@ -1722,9 +1753,29 @@ class MainActivity : AppCompatActivity() {
             pickerNotice("正在配对「$name」：请在系统弹窗确认")
         } else {
             pendingBondAddress = null
+            val wasGuided = guidedBond != null
+            cancelGuidedBond()
             log("BT-PAIR: 配对「$name」($address) 发起失败（设备可能已配对或蓝牙忙）")
-            pickerNotice("无法发起配对——请在系统蓝牙设置中手动配对")
+            pickerNotice(
+                if (wasGuided) "无法发起配对，请确认车机停在 Apple CarPlay 搜索页面后重试"
+                else "无法发起配对——请在系统蓝牙设置中手动配对",
+            )
         }
+    }
+
+    private fun takeGuidedBond(): TargetDevicePrefs.Target? {
+        val target = guidedBond ?: return null
+        guidedBond = null
+        guidedBondTimeout?.let { mainHandler.removeCallbacks(it) }
+        guidedBondTimeout = null
+        targetPicker?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        return target
+    }
+
+    private fun cancelGuidedBond() {
+        val target = takeGuidedBond() ?: return
+        pendingBondAddress = null
+        SessionController.cancelFirstCarPlayPairing(this, target)
     }
 
     /**
@@ -1806,9 +1857,20 @@ class MainActivity : AppCompatActivity() {
                 pendingBondAddress = null
                 val name = deviceDisplayName(device)
                 log("BT-PAIR: ✓ 已与「$name」($address) 完成配对——自动设为目标")
+                val firstPairing = takeGuidedBond()
                 // 先关弹窗再提示：snackbar 在 Activity 窗口内，弹窗未关时会被盖住
                 dialog.dismiss()
                 setTarget(device, name)
+                if (firstPairing != null) {
+                    if (SessionController.completeFirstCarPlayPairing(firstPairing)) {
+                        log("BT-PAIR: 首次配对已完成，继续使用配对前开启的 CarPlay 监听")
+                        snack("已完成蓝牙配对，等待车机启动 CarPlay")
+                    } else {
+                        SessionController.cancelFirstCarPlayPairing(this, firstPairing)
+                        snack("蓝牙已配对，请点「启动连接」继续")
+                    }
+                    return
+                }
                 // 两次尝试及设备级兜底均核对当前偏好、目标和配对状态；兼容模式
                 // 开启后不再主动断开系统蓝牙，等待期间切换目标也不会继续操作旧设备。
                 val app = applicationContext
@@ -1853,7 +1915,13 @@ class MainActivity : AppCompatActivity() {
 
             BluetoothDevice.BOND_NONE -> {
                 pendingBondAddress = null
+                val wasGuided = guidedBond != null
+                cancelGuidedBond()
                 log("BT-PAIR: 与 $address 配对未完成（用户取消或失败）")
+                if (wasGuided) {
+                    pickerNotice("配对未完成，请回到车机 Apple CarPlay 页面后重试")
+                    return
+                }
                 // 弹窗仍开着：用 Toast（浮在弹窗之上）+ 弹窗内状态行，不用被遮挡的 snackbar
                 pickerNotice("配对未完成——可再点「配对」重试，或到系统蓝牙设置手动配对")
             }
@@ -2635,6 +2703,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         phoneDestinationInput.dismissIfStale(null)
+        cancelGuidedBond()
         super.onDestroy()
         wifiJoinDialog?.cancel()
         wifiJoinDialog = null

@@ -78,6 +78,8 @@ import java.util.concurrent.atomic.AtomicLong
  */
 object SessionController {
     private const val CAR_CALLBACK_WINDOW_MS = 30_000L
+
+    @Volatile private var firstPairingTarget: TargetDevicePrefs.Target? = null
     internal val steeringDialProbe = SteeringDialProbe()
     // ---- 日志缓冲（进程级；Activity 订阅渲染）----
 
@@ -485,9 +487,7 @@ object SessionController {
             val wifiCredentialHook: (Iap2SenderSession.WifiConfiguration) -> Unit =
                 { wifi -> onWifiCredentials(wifi) }
             // 目标车机动态读取：选择后下一轮连接尝试/下一次连入即生效，无需重启链路
-            val targetProvider: () -> TargetDevicePrefs.Target? = {
-                appContext?.let { TargetDevicePrefs.get(it) }
-            }
+            val targetProvider: () -> TargetDevicePrefs.Target? = ::bluetoothTarget
             bluetoothServer =
                 Iap2BluetoothServer(
                     context,
@@ -548,8 +548,32 @@ object SessionController {
             bluetoothServer?.isRunning == true ||
             bluetoothClient?.isRunning == true
 
+    private fun bluetoothTarget(): TargetDevicePrefs.Target? =
+        firstPairingTarget ?: appContext?.let { TargetDevicePrefs.get(it) }
+
+    fun supportsCarPlayFirstPairing(context: Context): Boolean =
+        context.resources.getBoolean(R.bool.prefer_car_bluetooth_callback)
+
     fun prefersCarBluetoothCallback(context: Context): Boolean =
-        context.resources.getBoolean(R.bool.prefer_car_bluetooth_callback) && TargetDevicePrefs.get(context) != null
+        supportsCarPlayFirstPairing(context) && TargetDevicePrefs.get(context) != null
+
+    fun startFirstCarPlayPairing(context: Context, target: TargetDevicePrefs.Target): Boolean =
+        supportsCarPlayFirstPairing(context) && startConnection(context, target)
+
+    /** The activity persists the paired target before handing over to normal reconnection. */
+    fun completeFirstCarPlayPairing(target: TargetDevicePrefs.Target): Boolean {
+        if (firstPairingTarget !== target || connectCancelled || bluetoothServer?.isRunning != true) return false
+        firstPairingTarget = null
+        if (phaseHint == FIRST_PAIRING_HINT) phaseHint = "已配对，等待车机启动 CarPlay…"
+        bluetoothClient?.start(inboundWaitMillis = CAR_CALLBACK_WINDOW_MS)
+        return true
+    }
+
+    fun cancelFirstCarPlayPairing(context: Context, target: TargetDevicePrefs.Target) {
+        if (firstPairingTarget === target) disconnect(context)
+    }
+
+    private const val FIRST_PAIRING_HINT = "在手机和车机上确认蓝牙配对…"
 
     /** Pairing cleanup must honor both the current preference and a running session snapshot. */
     fun allowsPostBondDisconnect(
@@ -569,12 +593,33 @@ object SessionController {
      * 幂等：已有会话时 BT 组件的 start() 自行短路，不会双开。
      */
     fun startConnection(context: Context) {
+        startConnection(context, firstPairing = null)
+    }
+
+    private fun startConnection(context: Context, firstPairing: TargetDevicePrefs.Target?): Boolean {
+        if (isSessionRunning() || sessionStarting.get()) return false
         if (ShizukuGate.state(context) != ShizukuGate.State.READY || !CarInputClient.isReady()) {
             appendLog("SHIZUKU: 触控服务未接通，已阻止启动；请在手机端重试准备")
-            return
+            return false
+        }
+        if (firstPairing != null) {
+            firstPairingTarget = firstPairing
+            // Register the secure service while the car can still discover it during system pairing.
+            val listening = runCatching { bluetoothServer?.start() == true }.getOrDefault(false)
+            if (!listening) {
+                firstPairingTarget = null
+                appendLog("BT-PAIR: CarPlay 蓝牙监听未启动，未发起首次配对")
+                return false
+            }
+            audioEnabledForSession = false
+            audioPreferCompat = false
         }
         if (bluetoothClient?.isRunning != true) {
-            activeBluetoothCompatibility = BluetoothCompatibilityPrefs.get(context.applicationContext)
+            activeBluetoothCompatibility = if (firstPairing != null) {
+                BluetoothCompatibilityPolicy(keepSystemBluetooth = true)
+            } else {
+                BluetoothCompatibilityPrefs.get(context.applicationContext)
+            }
             appendLog(
                 "BT-C: 本次蓝牙策略=" +
                     if (activeBluetoothCompatibility.keepSystemBluetooth) "保留系统蓝牙连接（兼容测试）" else "原有策略",
@@ -584,10 +629,10 @@ object SessionController {
         connectCancelled = false
         endpointCallbacks.activate()
         val preferCallback = prefersCarBluetoothCallback(context)
-        phaseHint = if (preferCallback) {
-            "请在车机选择 Apple CarPlay，等待建立连接…"
-        } else {
-            "蓝牙就绪，等待车机回连…"
+        phaseHint = when {
+            firstPairing != null -> FIRST_PAIRING_HINT
+            preferCallback -> "请在车机选择 Apple CarPlay，等待建立连接…"
+            else -> "蓝牙就绪，等待车机回连…"
         }
         when (
             ShizukuGate
@@ -617,8 +662,12 @@ object SessionController {
         // 每轮多花 1~3 秒；现在启动连接即发布，换网时 ensureForNetwork 会自动重注册。
         ctrlAdvertiser?.resetInviteCount()
         // 后台发布：start() 首次要向 Shizuku 解析真实蓝牙 MAC（shell），不能在主线程做
-        Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
-        if (preferCallback && bluetoothServer?.start() == true) {
+        Bg.run("ctrl-publish") {
+            ctrlAdvertiser?.start { !connectCancelled && wifiJoins.isCurrent(connectionEpoch) }
+        }
+        if (firstPairing != null) {
+            appendLog("BT-PAIR: CarPlay 蓝牙服务已就绪；等待系统配对，暂停手机主动连接")
+        } else if (preferCallback && bluetoothServer?.start() == true) {
             // Give iDrive a window to initiate Bluetooth without competing SDP or RFCOMM requests.
             bluetoothClient?.start(inboundWaitMillis = CAR_CALLBACK_WINDOW_MS)
         } else {
@@ -628,13 +677,14 @@ object SessionController {
         // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
         // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
         Bg.run("bt-profile-diag") {
-            val target = appContext?.let { TargetDevicePrefs.get(it) } ?: return@run
+            val target = bluetoothTarget() ?: return@run
             val connected = BtProfiles.connectedNames(context.applicationContext, target.address)
             appendLog(
                 "BT-PROFILE: 连接前「${target.name}」的蓝牙配置文件状态=" +
                     (connected.takeIf { it.isNotEmpty() }?.joinToString("/") ?: "未连接"),
             )
         }
+        return true
     }
 
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
@@ -657,6 +707,7 @@ object SessionController {
             .stop(context)
         bluetoothServer?.stop()
         bluetoothClient?.stop()
+        firstPairingTarget = null
         ctrlAdvertiser?.stop()
         endpointBrowser?.stop()
         wifiConnector?.release()
@@ -1359,7 +1410,7 @@ object SessionController {
     }
 
     private fun selectedCtrlReceiver(): Long? =
-        appContext?.let { TargetDevicePrefs.get(it)?.address }?.replace(":", "")?.toLongOrNull(16)
+        bluetoothTarget()?.address?.replace(":", "")?.toLongOrNull(16)
 
     private fun logTrialInvitation(receiver: Long?, localAddress: String?) {
         if (connectCancelled) return
@@ -2166,7 +2217,7 @@ object SessionController {
                     endpointBrowser?.ensureForNetwork(
                         network,
                         endpoint.ssid,
-                        appContext?.let { TargetDevicePrefs.get(it)?.address },
+                        bluetoothTarget()?.address,
                     )
                     true
                 }

@@ -159,7 +159,8 @@ class CarPlayCtrlAdvertiser(
     }
 
     @Synchronized
-    fun start(): Boolean {
+    fun start(isCurrent: () -> Boolean = { true }): Boolean {
+        if (!isCurrent()) return false
         if (registered) return true
         return try {
             val socket = ServerSocket(0)
