@@ -80,7 +80,7 @@ import java.util.concurrent.atomic.AtomicLong
  * 销毁/重建对其无影响。会话逻辑线程通过 [appContext] 运行，不依赖任何 Activity。
  */
 object SessionController {
-    private const val CAR_CALLBACK_WINDOW_MS = 30_000L
+    internal const val CAR_CALLBACK_WINDOW_SECONDS = 60
     private const val CAR_FIRST_INPUT_TIMEOUT_MS = 12_000L
 
     internal val steeringDialProbe = SteeringDialProbe()
@@ -574,6 +574,11 @@ object SessionController {
             appendLog("BT: 缺少「附近的设备」连接权限，已阻止启动")
             return
         }
+        val callbackFirst = context.resources.getBoolean(R.bool.prefer_car_bluetooth_callback)
+        if (callbackFirst && TargetDevicePrefs.get(context.applicationContext) == null) {
+            appendLog("BT: 请先在连接准备中选择已配对的宝马，再启动连接")
+            return
+        }
         if (bluetoothClient?.isRunning != true) {
             appendLog("BT: 已确认「附近的设备」连接权限")
             activeBluetoothCompatibility = BluetoothCompatibilityPrefs.get(context.applicationContext)
@@ -615,17 +620,15 @@ object SessionController {
         ctrlAdvertiser?.resetInviteCount()
         // 后台发布：start() 首次要向 Shizuku 解析真实蓝牙 MAC（shell），不能在主线程做
         Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
-        val callbackFirst = context.resources.getBoolean(R.bool.prefer_car_bluetooth_callback) &&
-            TargetDevicePrefs.get(context.applicationContext) != null
         if (callbackFirst) {
             val listening = bluetoothServer?.start() == true
             phaseHint = if (listening) {
-                "请在车机选择 Apple CarPlay，等待车机主动连接…"
+                "请在宝马「移动设备」中选择本手机的 Apple CarPlay…"
             } else {
                 "车机回连监听未启动，手机将主动尝试连接…"
             }
             bluetoothClient?.start(
-                inboundWaitMillis = if (listening) CAR_CALLBACK_WINDOW_MS else 0L,
+                inboundWaitMillis = if (listening) CAR_CALLBACK_WINDOW_SECONDS * 1_000L else 0L,
                 firstInputTimeoutMillis = CAR_FIRST_INPUT_TIMEOUT_MS,
             )
         } else {

@@ -41,9 +41,9 @@ android {
             signingConfig = if (hasReleaseKeystore) signingConfigs.getByName("release") else null
         }
         debug {
-            // The iDrive 7 field test can be installed alongside the public trial.
-            applicationIdSuffix = ".samsunghkid7test"
-            versionNameSuffix = "-samsung-hk-id7-test"
+            // This iDrive 8 test has its own package alongside other CarDeck variants.
+            applicationIdSuffix = ".realmegt8id8test"
+            versionNameSuffix = "-realme-gt8pro-id8-test"
         }
     }
 
@@ -72,7 +72,7 @@ android {
 // Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(168) }
+        variant.outputs.forEach { output -> output.versionCode.set(171) }
     }
 }
 

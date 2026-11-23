@@ -15,4 +15,5 @@
     <string name="samsung_coexistence_hint">保持移动数据开启。投屏时会为需要的直连应用临时优先使用移动数据。此开关控制下次连接的详细网络日志。</string>
     <string name="samsung_data_settings_path">请在系统设置中打开「连接 → 流量监控 → 联网管理」。</string>
     <string name="accessibility_description">镜像模式：把车机触摸手势注入手机屏幕，不读取屏幕内容</string>
+    <string name="car_callback_scan_hint">请先选择上方已配对的宝马。需要配对时可点「重新扫描」。</string>
 </resources>

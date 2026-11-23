@@ -74,7 +74,6 @@ class MainActivity : AppCompatActivity() {
         const val KEY_DISCLAIMER_DEADLINE = "disclaimer_deadline"
         const val KEY_BLUETOOTH_PERMISSION_ACTION = "bluetooth_permission_action"
         const val KEY_PENDING_CAR_VISIBILITY_TARGET = "pending_car_visibility_target"
-        const val CAR_VISIBILITY_SECONDS = 60
     }
 
     private val phoneDestinationInput by lazy { io.github.shaonialife.cardeck.ui.PhoneDestinationInput(this) }
@@ -725,7 +724,7 @@ class MainActivity : AppCompatActivity() {
         try {
             carVisibilityLauncher.launch(
                 Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
-                    .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, CAR_VISIBILITY_SECONDS),
+                    .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, SessionController.CAR_CALLBACK_WINDOW_SECONDS),
             )
         } catch (_: RuntimeException) {
             finishCarVisibility("unavailable")
@@ -744,8 +743,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun startPreparedConnection() {
         SessionController.startConnection(this)
-        // Android 13+ 的通知权限与蓝牙授权分别处理。
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+        // 回连试验留出整段时间供车机操作，非必要的通知授权不占用发现窗口。
+        if (!resources.getBoolean(R.bool.prefer_car_bluetooth_callback) &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
@@ -1532,11 +1532,14 @@ class MainActivity : AppCompatActivity() {
      *  组 2「附近的设备」——实时扫描（经典蓝牙 discovery），点击未配对设备即发起
      *  系统配对，配对成功后自动设为目标。
      *
-     * 首行「自动（不指定）」保留原有语义：出站逐个尝试、入站来者不拒；
-     * 选定后出站只连目标、入站拒绝非目标（防误连家里另一台车机）。
-     * 选择立即生效（链路动态读取目标，无需重连）。
+     * 回连测试须指定一台已配对的车机，切换目标前结束本次连接。
      */
     private fun showTargetPicker() {
+        val callbackTrial = resources.getBoolean(R.bool.prefer_car_bluetooth_callback)
+        if (callbackTrial && (SessionController.isSessionRunning() || pendingCarVisibilityTarget != null)) {
+            snack("请先断开本次连接，再更换车机")
+            return
+        }
         if (!hasBluetoothConnectPermission()) {
             requestBluetoothConnectPermission(BluetoothPermissionAction.PICK_TARGET)
             return
@@ -1577,10 +1580,14 @@ class MainActivity : AppCompatActivity() {
             dialog.window?.setLayout(width, android.view.ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         dialog.show()
-        startTargetScan(dialog)
+        if (callbackTrial) {
+            view.findViewById<TextView>(R.id.scanStatus).text = getString(R.string.car_callback_scan_hint)
+        } else {
+            startTargetScan(dialog)
+        }
     }
 
-    /** 渲染「已配对」组：自动行 + 每个已配对设备。 */
+    /** 渲染已配对设备，普通模式也提供自动选择。 */
     private fun renderBondedGroup(view: View) {
         val list = view.findViewById<LinearLayout>(R.id.bondedList)
         val empty = view.findViewById<TextView>(R.id.bondedEmpty)
@@ -1589,6 +1596,10 @@ class MainActivity : AppCompatActivity() {
         // 「自动（不指定）」是模式而非设备：单独放在两组之上，不混进「已配对」组
         view.findViewById<LinearLayout>(R.id.autoRowContainer).apply {
             removeAllViews()
+            if (resources.getBoolean(R.bool.prefer_car_bluetooth_callback)) {
+                visibility = View.GONE
+                return@apply
+            }
             addView(
                 inflateTargetRow(
                     name = "自动（不指定目标）",
