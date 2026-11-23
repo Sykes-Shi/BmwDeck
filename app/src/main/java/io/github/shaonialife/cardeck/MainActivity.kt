@@ -180,7 +180,7 @@ class MainActivity : AppCompatActivity() {
             log("BLUETOOTH_CONNECT 授权: $granted")
             if (granted && pendingStartAfterBtPermission.compareAndSet(true, false)) {
                 // 授权期间 Shizuku 可能被停掉：这里同样走前置检查
-                ensureShizukuReady { showAudioChoiceDialog() }
+                ensureShizukuReady { showConnectionEntry() }
             }
         }
 
@@ -253,6 +253,49 @@ class MainActivity : AppCompatActivity() {
     private val pendingStartAfterProjection =
         java.util.concurrent.atomic
             .AtomicBoolean(false)
+
+    private fun showConnectionEntry() {
+        if (!SessionController.supportsCarPlayFirstPairing(this)) {
+            showAudioChoiceDialog()
+            return
+        }
+
+        val target = TargetDevicePrefs.get(this)
+        val existingPair = target?.takeIf { selected ->
+            bondedDevices().any { TargetDevicePrefs.matches(selected, it.address) }
+        }
+        if (existingPair == null) {
+            DarkMessageDialog.show(
+                activity = this,
+                title = "CarPlay 首次配对",
+                message = "在车机打开「移动设备 → 新设备 → Apple CarPlay」，停在搜索设备页面。然后在手机查找宝马，点「配对并连接」。",
+                actions = listOf(
+                    DarkMessageDialog.Action("查找车机", DarkMessageDialog.Emphasis.PRIMARY) {
+                        showTargetPicker()
+                    },
+                ),
+            )
+            return
+        }
+
+        log("BT-ENTRY: 所选车机仍保留系统蓝牙配对，显示首次配对引导")
+        DarkMessageDialog.show(
+            activity = this,
+            title = "这辆车已配对",
+            message = "要进行 CarPlay 首次配对，请在手机蓝牙设置和车机移动设备里分别取消这部手机与「${existingPair.name}」的旧配对。完成后返回 CarDeck，点「配对或重连」。",
+            actions = listOf(
+                DarkMessageDialog.Action("去手机蓝牙设置", DarkMessageDialog.Emphasis.PRIMARY) {
+                    runCatching {
+                        startActivity(Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS))
+                    }.onFailure { snack("请打开手机设置中的蓝牙页面") }
+                },
+                DarkMessageDialog.Action("沿用旧配对重连") {
+                    log("BT-ENTRY: 用户选择沿用旧配对重连")
+                    showAudioChoiceDialog()
+                },
+            ),
+        )
+    }
 
     /**
      * 「启动连接」前的音频选择弹窗：
@@ -412,7 +455,7 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             log("ACCESS_FINE_LOCATION 授权: $granted")
             if (granted && pendingStartAfterLocationPermission.compareAndSet(true, false)) {
-                ensureShizukuReady { showAudioChoiceDialog() }
+                ensureShizukuReady { showConnectionEntry() }
             }
         }
 
@@ -539,7 +582,7 @@ class MainActivity : AppCompatActivity() {
         actions += DarkMessageDialog.Action("取消") {}
         actions +=
             DarkMessageDialog.Action("重试检查") {
-                ensureShizukuReady { showAudioChoiceDialog() }
+                ensureShizukuReady { showConnectionEntry() }
             }
         when (state) {
             ShizukuGate.State.NOT_RUNNING ->
@@ -777,7 +820,7 @@ class MainActivity : AppCompatActivity() {
                         }
                         if (granted && pendingShizukuThenConnect) {
                             pendingShizukuThenConnect = false
-                            ensureShizukuReady { showAudioChoiceDialog() }
+                            ensureShizukuReady { showConnectionEntry() }
                         } else if (!granted) {
                             snack("未获得 Shizuku 授权——连接仍不可用")
                         }
@@ -948,7 +991,7 @@ class MainActivity : AppCompatActivity() {
             when (heroState) {
                 HeroState.CONNECTED -> promptDisconnect()
                 // 前置检查：Shizuku（硬性依赖）→ 蓝牙权限/开关 → 音频选择
-                HeroState.IDLE -> ensureShizukuReady { ensureBluetoothReady { showAudioChoiceDialog() } }
+                HeroState.IDLE -> ensureShizukuReady { ensureBluetoothReady { showConnectionEntry() } }
                 // 连接中可取消：卡在错误网络/等待回连时用户主动脱身（弹窗防误触）
                 HeroState.CONNECTING -> promptCancelConnecting()
                 null -> {}
@@ -1097,8 +1140,13 @@ class MainActivity : AppCompatActivity() {
         CarInputClient.logSink = { line -> log(line) }
 
         log("CarDeck Phase 0 就绪")
-        log("真车：开启蓝牙、Wi-Fi 与移动数据，与车机配对后点「启动连接」，CarDeck 会尝试自动加入车机热点")
-        log("若停在等待车机回连，请在车机「移动设备」中选择本手机的 Apple CarPlay/连接；自动加入热点失败时再手动加入")
+        if (SessionController.supportsCarPlayFirstPairing(this)) {
+            log("iQOO 测试：车机打开 Apple CarPlay 的搜索设备页，手机点「配对或重连」")
+            log("首次配对请在「附近的设备」里对宝马点「配对并连接」；已有旧配对时按引导处理")
+        } else {
+            log("真车：开启蓝牙、Wi-Fi 与移动数据，与车机配对后点「启动连接」，CarDeck 会尝试自动加入车机热点")
+            log("若停在等待车机回连，请在车机「移动设备」中选择本手机的 Apple CarPlay/连接；自动加入热点失败时再手动加入")
+        }
         log("测试台：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 点「启动连接」等待回连")
     }
 
@@ -1232,13 +1280,14 @@ class MainActivity : AppCompatActivity() {
         when (s) {
             HeroState.IDLE -> {
                 val pending = pendingResidualDisplays
-                heroSubline.text =
-                    if (pending != null) {
-                        "上次会话异常退出，遗留 ${pending.size} 个虚拟屏待清理"
-                    } else {
-                        "与车机蓝牙完成配对后，点击下方按钮发起无线连接"
-                    }
-                styleCta(R.drawable.bg_cta_fill, R.color.m3_on_primary, R.drawable.ic_play, "启动连接")
+                val firstPairingTrial = SessionController.supportsCarPlayFirstPairing(this)
+                heroSubline.text = when {
+                    pending != null -> "上次会话异常退出，遗留 ${pending.size} 个虚拟屏待清理"
+                    firstPairingTrial -> "从车机 Apple CarPlay 页面开始配对"
+                    else -> "与车机蓝牙完成配对后，点击下方按钮发起无线连接"
+                }
+                val action = if (firstPairingTrial) "配对或重连" else "启动连接"
+                styleCta(R.drawable.bg_cta_fill, R.color.m3_on_primary, R.drawable.ic_play, action)
                 audioTag.visibility = View.GONE
             }
             HeroState.CONNECTING -> {
@@ -1542,6 +1591,9 @@ class MainActivity : AppCompatActivity() {
                     iconTint = R.color.m3_primary,
                 ) {
                     setTarget(device, name, closePicker = true)
+                    if (SessionController.supportsCarPlayFirstPairing(this) && !SessionController.isSessionRunning()) {
+                        showConnectionEntry()
+                    }
                 },
             )
         }
@@ -1867,7 +1919,7 @@ class MainActivity : AppCompatActivity() {
                         snack("已完成蓝牙配对，等待车机启动 CarPlay")
                     } else {
                         SessionController.cancelFirstCarPlayPairing(this, firstPairing)
-                        snack("蓝牙已配对，请点「启动连接」继续")
+                        snack("蓝牙已配对，请点「配对或重连」继续")
                     }
                     return
                 }
