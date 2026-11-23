@@ -1,7 +1,10 @@
 package io.github.shaonialife.cardeck
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.view.KeyEvent
+import androidx.core.content.ContextCompat
 import io.github.shaonialife.cardeck.airplay.AirPlayClient
 import io.github.shaonialife.cardeck.airplay.BmwControlIapCompatibility
 import io.github.shaonialife.cardeck.airplay.BmwRequestUiRecoveryPolicy
@@ -13,6 +16,8 @@ import io.github.shaonialife.cardeck.audio.AudioSender
 import io.github.shaonialife.cardeck.audio.AudioTuning
 import io.github.shaonialife.cardeck.bt.BtProfiles
 import io.github.shaonialife.cardeck.bt.BtSessionGate
+import io.github.shaonialife.cardeck.bt.BluetoothCompatibilityPolicy
+import io.github.shaonialife.cardeck.bt.BluetoothCompatibilityPrefs
 import io.github.shaonialife.cardeck.bt.Iap2BluetoothClient
 import io.github.shaonialife.cardeck.bt.Iap2BluetoothServer
 import io.github.shaonialife.cardeck.bt.TargetDevicePrefs
@@ -233,7 +238,10 @@ object SessionController {
     /** DCL 双检锁的可发布字段（无 volatile 的双检锁是坏发布——虽然当前仅主线程调用，别留隐患）。 */
     @Volatile
     private var bluetoothServer: Iap2BluetoothServer? = null
+    @Volatile
     private var bluetoothClient: Iap2BluetoothClient? = null
+    @Volatile
+    private var activeBluetoothCompatibility = BluetoothCompatibilityPolicy()
     private var ctrlAdvertiser: CarPlayCtrlAdvertiser? = null
 
     /**
@@ -501,6 +509,7 @@ object SessionController {
                     onWifiCredentials = wifiCredentialHook,
                     onEndpointUpdate = { endpoint -> dispatchEndpoint(endpoint, "主动连车机", late = true) },
                     targetProvider = targetProvider,
+                    shouldDisconnectProfiles = { activeBluetoothCompatibility.disconnectProfiles },
                 )
             ctrlAdvertiser = CarPlayCtrlAdvertiser(context) { line -> appendLog(line) }
             endpointBrowser =
@@ -536,6 +545,19 @@ object SessionController {
             bluetoothServer?.isRunning == true ||
             bluetoothClient?.isRunning == true
 
+    /** Pairing cleanup must honor both the current preference and a running session snapshot. */
+    fun allowsPostBondDisconnect(
+        context: Context,
+        targetMatches: Boolean,
+        isBonded: Boolean,
+        interrupted: Boolean,
+    ): Boolean {
+        val activeKeep = if (isSessionRunning()) activeBluetoothCompatibility.keepSystemBluetooth else null
+        return BluetoothCompatibilityPrefs.get(context.applicationContext).allowsPostBondDisconnect(
+            targetMatches, isBonded, interrupted, activeKeep,
+        )
+    }
+
     /**
      * 「启动连接」主体（权限检查由 Activity 完成后调用）：前台保活服务 + 双向蓝牙。
      * 幂等：已有会话时 BT 组件的 start() 自行短路，不会双开。
@@ -544,6 +566,20 @@ object SessionController {
         if (ShizukuGate.state(context) != ShizukuGate.State.READY || !CarInputClient.isReady()) {
             appendLog("SHIZUKU: 触控服务未接通，已阻止启动；请在手机端重试准备")
             return
+        }
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            appendLog("BT: 缺少「附近的设备」连接权限，已阻止启动")
+            return
+        }
+        if (bluetoothClient?.isRunning != true) {
+            appendLog("BT: 已确认「附近的设备」连接权限")
+            activeBluetoothCompatibility = BluetoothCompatibilityPrefs.get(context.applicationContext)
+            appendLog(
+                "BT-C: 本次蓝牙策略=" +
+                    if (activeBluetoothCompatibility.keepSystemBluetooth) "保留系统蓝牙连接（兼容测试）" else "原有策略",
+            )
         }
         val connectionEpoch = wifiJoins.activate(VpnCoexistencePrefs.isEnabled(context))
         connectCancelled = false
@@ -578,18 +614,16 @@ object SessionController {
         ctrlAdvertiser?.resetInviteCount()
         // 后台发布：start() 首次要向 Shizuku 解析真实蓝牙 MAC（shell），不能在主线程做
         Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
-        // 真车路径：手机主动连车机（SDP …caff 配件服务）
-        // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
+        // 手机可以主动发起连接，也可以由监听端接收车机回连。
         bluetoothClient?.start()
         bluetoothServer?.start()
-        // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
-        // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
+        // 记录启动时的配置状态。查询在线程内完成，状态可能随连接变化。
         Bg.run("bt-profile-diag") {
             val target = appContext?.let { TargetDevicePrefs.get(it) } ?: return@run
             val connected = BtProfiles.connectedNames(context.applicationContext, target.address)
             appendLog(
-                "BT-PROFILE: 连接前「${target.name}」的蓝牙配置文件状态=" +
-                    (connected.takeIf { it.isNotEmpty() }?.joinToString("/") ?: "未连接"),
+                "BT-PROFILE: 启动阶段目标设备的蓝牙配置文件状态=" +
+                    (connected.takeIf { it.isNotEmpty() }?.joinToString("/") ?: "未观察到已连接配置"),
             )
         }
     }
@@ -2345,11 +2379,7 @@ object SessionController {
                     if (pairedKeys != null || plainSession) {
                         phaseHint = if (pairedKeys != null) "配对完成，建立 CarPlay 会话…" else "建立明文会话…"
                         if (pairedKeys != null) {
-                            appendLog(
-                                "AIRPLAY: ✓ 配对完成 writeKey=" +
-                                    pairedKeys.phoneWriteKey.joinToString("") { "%02x".format(it) }.take(16) + "… " +
-                                    "readKey=" + pairedKeys.phoneReadKey.joinToString("") { "%02x".format(it) }.take(16) + "…",
-                            )
+                            appendLog("AIRPLAY: ✓ 配对完成")
                         }
                         // 已配对 → 共享密钥；明文会话 → null（流加密降级为 AES-CTR 零密钥）
                         var sessionKey = pairedKeys?.sharedSecret
@@ -2394,7 +2424,11 @@ object SessionController {
                             fun compactRevision(): Long? = if (compactScreen != null) compactScreen.revision
                                 else uiRecoveryClient.controllerInputRevision
                             var compactEvents = 0
-                            appendLog("ID6-KEYS: descriptors=${setup.hidDescriptors.size} compact=${compactDevices.size}")
+                            var unknownHidEvents = 0
+                            appendLog(
+                                "EVENT: HID setup declared=${setup.hidDeviceUuids.distinct().size}" +
+                                    " descriptors=${setup.hidDescriptors.size} compact=${compactDevices.size}",
+                            )
                             var rotaryEvents = 0
                             client.connectEventChannel(sessionKey, setup) { command ->
                                 val generation = VirtualLauncher.sessionGeneration()
@@ -2542,14 +2576,14 @@ object SessionController {
                                             return@connectEventChannel
                                         }
                                         val compact = compactDevices[uuid]
-                                        if (compact != null && report?.size == 2) {
-                                            val presses = compact.decode(report)
+                                        val presses = report?.let { compact?.decode(it) }
+                                        if (presses != null) {
                                             val revision = compactRevision()
                                             fun live() = revision != null && compactRevision() == revision &&
                                                 currentClient === uiRecoveryClient && !uiRecoveryClient.cancelled &&
                                                 !connectCancelled && videoSender?.isRunning == true &&
                                                 VirtualLauncher.isCurrentSession(generation)
-                                            if (presses != null && live()) {
+                                            if (live()) {
                                                 presses.navigation.forEach { CarControllerRouter.submit(it, ::live) }
                                                 presses.media.forEach { usage ->
                                                     val key = if (usage == 0xcd) KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
@@ -2557,10 +2591,12 @@ object SessionController {
                                                     if (key != 0 && live()) dispatchMediaKey(key)
                                                 }
                                             }
-                                            if (presses == null || presses.navigation.isNotEmpty() || presses.media.isNotEmpty()) {
+                                            if (presses.navigation.isNotEmpty() || presses.media.isNotEmpty()) {
                                                 compactEvents++
                                                 if (compactEvents <= 32 || compactEvents % 100 == 0) {
-                                                    appendLog("ID6-KEYS: nav=${presses?.navigation} media=${presses?.media} active=${live()}")
+                                                    appendLog(
+                                                        "EVENT: HID compact nav=${presses.navigation} media=${presses.media} active=${live()}",
+                                                    )
                                                 }
                                             }
                                             return@connectEventChannel
@@ -2573,8 +2609,8 @@ object SessionController {
                                         // DiPlay 的 knob(4B) 与 telephony(1B) 报告长度与媒体键重叠，
                                         // 只靠长度会误判（如 telephony usage 0xB3 会误发「快进」）。
                                         val descriptor = uuid?.let { setup.hidDescriptors[it] }
-                                        val keyMap =
-                                            descriptor?.let(ConsumerKeys::parseDescriptor)
+                                        // Do not reinterpret an unmatched report ID as a legacy media key.
+                                        val keyMap = descriptor?.takeIf { compact == null }?.let(ConsumerKeys::parseDescriptor)
                                         val rawValue =
                                             report
                                                 ?.takeIf { it.isNotEmpty() }
@@ -2594,7 +2630,8 @@ object SessionController {
                                                 // 描述符不可用时按报文长度回退——不依赖车机型号或 uuid
                                                 val touchFormat =
                                                     descriptor?.let(TouchReports::formatFromDescriptor)
-                                                TouchReports.parse(report, touchFormat)
+                                                if (compact != null && touchFormat == null) null
+                                                else TouchReports.parse(report, touchFormat)
                                             } else {
                                                 null
                                             }
@@ -2635,10 +2672,14 @@ object SessionController {
                                                 )
                                             }
                                         } else if (report != null) {
-                                            appendLog(
-                                                "EVENT: 其他 HID 报告 uuid=$uuid bytes=${report.size}" +
-                                                    " hex=${report.joinToString(" ") { "%02x".format(it) }}",
-                                            )
+                                            unknownHidEvents++
+                                            if (unknownHidEvents <= 24 || unknownHidEvents % 100 == 0) {
+                                                appendLog(
+                                                    "EVENT: HID unresolved bytes=${report.size}" +
+                                                        " descriptor=${descriptor != null} compactLayout=${compact != null}" +
+                                                        " screenOwned=${compactRevision() != null} count=$unknownHidEvents",
+                                                )
+                                            }
                                         }
                                     }
 
@@ -2741,15 +2782,13 @@ object SessionController {
                                 // 建立失败不阻塞会话（触摸不可用但视频照常）。
                                 val tunnel = client.runIapTunnel(sessionKey)
                                 tunnel?.onIapMessage = { frame ->
-                                    // 触摸证据采集：先全量记录，格式确认后接 TouchRouter
+                                    // 仅保留消息类型及长度，避免泄露隧道中的凭据。
                                     if (frame.messageId != 0x0000) {
-                                        val hex = frame.body.joinToString(" ") { "%02x".format(it) }
                                         appendLog(
                                             "TUNNEL: rx 0x${frame.messageId.toString(16)} " +
                                                 "(${Iap2MessageIds.nameOf(
                                                     frame.messageId,
-                                                )}) ${frame.body.size}B" +
-                                                if (frame.body.isNotEmpty()) " hex=${hex.take(120)}" else "",
+                                                )}) ${frame.body.size}B",
                                         )
                                     }
                                 }

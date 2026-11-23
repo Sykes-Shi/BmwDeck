@@ -6,7 +6,7 @@ package io.github.shaonialife.cardeck.input
  * first, and Array values select usages starting at the logical minimum.
  */
 internal class CompactCarHid private constructor(
-    private val layouts: Map<Int, List<Field>>,
+    private val layouts: Map<Int, Layout>,
 ) {
     data class Presses(val navigation: List<CarControllerInput>, val media: List<Int>)
 
@@ -15,17 +15,21 @@ internal class CompactCarHid private constructor(
 
     /** Null means that this is not a valid report for one of the supported layouts. */
     fun decode(report: ByteArray): Presses? {
-        if (report.size != 2) return null
+        if (report.isEmpty()) return null
         val usesId = 0 !in layouts
         val id = if (usesId) report[0].toInt() and 0xff else 0
-        val fields = layouts[id] ?: return null
-        val payload = if (usesId) report[1].toInt() and 0xff
-            else (report[0].toInt() and 0xff) or ((report[1].toInt() and 0xff) shl 8)
+        val layout = layouts[id] ?: return null
+        val payloadStart = if (usesId) 1 else 0
+        if (report.size != payloadStart + layout.payloadBytes) return null
+        var payload = 0L
+        for (i in 0 until layout.payloadBytes) {
+            payload = payload or ((report[payloadStart + i].toLong() and 0xff) shl (8 * i))
+        }
         val navigation = linkedSetOf<CarControllerAction>()
         val relative = mutableListOf<CarControllerInput>()
         val media = linkedSetOf<Int>()
-        for (field in fields) {
-            val bits = (payload ushr field.offset) and ((1 shl field.size) - 1)
+        for (field in layout.fields) {
+            val bits = ((payload ushr field.offset) and ((1L shl field.size) - 1)).toInt()
             val value = if (field.min < 0) signed(bits, field.size) else bits
             if (value !in field.min..field.max) {
                 if (field.nullable) continue
@@ -74,12 +78,15 @@ internal class CompactCarHid private constructor(
             usage in values || (values.isEmpty() && first != null && last != null && usage in first..last)
     }
 
+    private data class Layout(val payloadBytes: Int, val fields: List<Field>)
+
     private data class Field(
         val offset: Int, val size: Int, val min: Int, val max: Int, val nullable: Boolean,
         val array: Boolean, val usage: Int?, val usages: Usages,
     )
 
     companion object {
+        private const val MAX_PAYLOAD_BYTES = 8
         private const val X = 0x00010030
         private const val Y = 0x00010031
         private const val DIAL = 0x00010037
@@ -150,7 +157,9 @@ internal class CompactCarHid private constructor(
                         if (depth == 0 || g.size !in 1..128 || g.count !in 1..128 || g.min > g.max) return null
                         val offset = offsets[g.id] ?: 0
                         offsets[g.id] = offset + g.size * g.count
-                        if (!supportedApplication || (value and 1) != 0 || offsets.getValue(g.id) > 16) {
+                        if (!supportedApplication || (value and 1) != 0 ||
+                            g.size > 16 || offsets.getValue(g.id) > 8 * MAX_PAYLOAD_BYTES
+                        ) {
                             usageList.clear()
                             usageMin = null
                             usageMax = null
@@ -186,10 +195,10 @@ internal class CompactCarHid private constructor(
                 }
             }
             if (depth != 0 || stack.isNotEmpty() || (0 in offsets && offsets.size > 1)) return null
-            val layouts = fields.filterKeys { id ->
-                val bytes = (offsets.getValue(id) + 7) / 8 + if (id == 0) 0 else 1
-                bytes == 2
-            }
+            val layouts = fields.entries.mapNotNull { (id, controls) ->
+                val bytes = (offsets.getValue(id) + 7) / 8
+                if (bytes in 1..MAX_PAYLOAD_BYTES) id to Layout(bytes, controls) else null
+            }.toMap()
             return layouts.takeIf { it.isNotEmpty() }?.let(::CompactCarHid)
         }
     }

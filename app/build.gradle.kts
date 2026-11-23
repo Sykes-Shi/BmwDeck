@@ -42,10 +42,9 @@ android {
             signingConfig = if (hasReleaseKeystore) signingConfigs.getByName("release") else null
         }
         debug {
-            applicationIdSuffix = ".id6test"
-            versionNameSuffix = "-id6-controls"
-            resValue("string", "id6_trial_label", "CarDeck BMW ID6 测试")
-            manifestPlaceholders["cardeckAppLabel"] = "@string/id6_trial_label"
+            // Upgrade the separate Samsung trial without replacing the previous ID6 controls APK.
+            applicationIdSuffix = ".samsungid6test"
+            versionNameSuffix = "-samsung-id6-retest"
         }
     }
 
@@ -75,8 +74,8 @@ android {
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
         variant.outputs.forEach { output ->
-            output.versionCode.set(170)
-            output.versionName.set("$appVersionName-v47-center-id6-test")
+            output.versionCode.set(168)
+            output.versionName.set("$appVersionName-v47-center-samsung-id6-retest")
         }
     }
 }

@@ -1,24 +1,22 @@
 package io.github.shaonialife.cardeck.bt
 
+import android.Manifest
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.SystemClock
 import android.util.Log
+import androidx.core.content.ContextCompat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * 蓝牙「**只配对、不连接**」策略。
- *
- * 奥迪 MIB3 实测（2026-10-18，用户报告）：手机与车机处于蓝牙**已连接**状态
- * （HFP 通话 / A2DP 媒体配置文件在线）时，车机不开放无线 CarPlay 的 iAP2 服务
- * 窗口——表现为 `BT-C: 连接失败（车机未就绪或不在无线配对窗口）` 每 3 秒重试。
- * 真 iPhone 的无线 CarPlay 也不依赖这些配置文件：控制通道走 iAP2 RFCOMM（独立
- * SDP 服务），声音走 WiFi 上的 AirPlay。因此正确形态是：**系统级配对 + iAP2
- * RFCOMM，其余配置文件一律不连**。
+ * 查询普通蓝牙配置文件状态，并在用户选择原有连接策略时尝试断开配置文件。
+ * 保留蓝牙的兼容策略由调用处控制，车机仍可自行切换连接模式。
  *
  * 实现说明：`BluetoothHeadset/A2dp/LeAudio.disconnect(BluetoothDevice)` 是
  * **@SystemApi**——编译期不可见，但运行时注解只要求 `BLUETOOTH_CONNECT`
@@ -51,6 +49,40 @@ object BtProfiles {
     /** profile id → 已获取的代理（进程内复用；代理本身无会话状态）。 */
     private val proxies = HashMap<Int, BluetoothProfile>()
 
+    /** Read the selected car's hands-free profile and voice link on the export worker. */
+    fun handsFreeSnapshot(context: Context, target: TargetDevicePrefs.Target?): String {
+        val unavailable = "BT-PROFILE: 通话对照 HFP=unknown SCO=unknown"
+        if (target == null) return "$unavailable target=unselected"
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) !=
+            PackageManager.PERMISSION_GRANTED
+        ) return "$unavailable reason=permission"
+        val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+            ?: return "$unavailable reason=adapter_unavailable"
+        val headset = proxy(context, BluetoothProfile.HEADSET) as? BluetoothHeadset
+            ?: return "$unavailable reason=profile_unavailable"
+        return try {
+            val device = adapter.getRemoteDevice(target.address)
+            val state = headset.getConnectionState(device)
+            val hfp = when (state) {
+                BluetoothProfile.STATE_CONNECTED -> "connected"
+                BluetoothProfile.STATE_CONNECTING -> "connecting"
+                BluetoothProfile.STATE_DISCONNECTED -> "disconnected"
+                BluetoothProfile.STATE_DISCONNECTING -> "disconnecting"
+                else -> "unknown"
+            }
+            val sco = when (state) {
+                BluetoothProfile.STATE_CONNECTED -> headset.isAudioConnected(device).toString()
+                BluetoothProfile.STATE_DISCONNECTED -> "false"
+                else -> "unknown"
+            }
+            "BT-PROFILE: 通话对照 HFP=$hfp SCO=$sco"
+        } catch (_: IllegalArgumentException) {
+            "$unavailable reason=invalid_target"
+        } catch (_: SecurityException) {
+            "$unavailable reason=permission"
+        }
+    }
+
     /** 该地址当前在线（已连接）的配置文件名称。 */
     fun connectedNames(
         context: Context,
@@ -76,7 +108,10 @@ object BtProfiles {
     fun disconnect(
         context: Context,
         device: BluetoothDevice,
+        isCurrent: () -> Boolean = { true },
+        runIfCurrent: (() -> Unit) -> Boolean = { action -> action(); true },
     ): List<String> {
+        if (!isCurrent()) return emptyList()
         val address =
             try {
                 device.address
@@ -84,16 +119,20 @@ object BtProfiles {
                 return emptyList()
             }
         val before = connectedNames(context, address)
-        if (before.isEmpty()) return emptyList()
+        if (before.isEmpty() || !isCurrent()) return before
         for (id in profiles) {
+            if (!isCurrent() || Thread.currentThread().isInterrupted) return before
             if (profileName(id) !in before) continue
-            proxy(context, id)?.let { disconnectProfile(it, device) }
+            val profile = proxy(context, id) ?: continue
+            if (!runIfCurrent { disconnectProfile(profile, device) }) return before
         }
-        if (!awaitDisconnected(context, address, 1_500L)) {
+        if (!awaitDisconnected(context, address, 1_500L, isCurrent) &&
+            BluetoothConnectionDiagnostics.shouldFallback(isCurrent(), Thread.currentThread().isInterrupted)) {
             // 配置级断开未生效（个别 ROM 限流）：设备级断开兜底（@hide，同样只要求
             // BLUETOOTH_CONNECT）。车载/耳机当前连接的设备可能被一并断开，属预期。
-            runCatching { BluetoothDevice::class.java.getMethod("disconnect").invoke(device) }
-            awaitDisconnected(context, address, 500L)
+            if (runIfCurrent { runCatching { BluetoothDevice::class.java.getMethod("disconnect").invoke(device) } }) {
+                awaitDisconnected(context, address, 500L, isCurrent)
+            }
         }
         return before
     }
@@ -104,21 +143,46 @@ object BtProfiles {
         address: String,
     ): List<String> = connectedNames(context, address)
 
+    /** Check only profiles that were observed before disconnect; missing proxies are unknown. */
+    internal fun disconnectResult(context: Context, address: String, before: List<String>): String {
+        val remaining = mutableListOf<String>()
+        var unknown = false
+        for (id in profiles) {
+            val name = profileName(id)
+            if (name !in before) continue
+            val p = proxy(context, id)
+            if (p == null) {
+                unknown = true
+                continue
+            }
+            try {
+                @Suppress("DEPRECATION")
+                if (p.connectedDevices.any { it.address.equals(address, ignoreCase = true) }) remaining += name
+            } catch (_: Throwable) {
+                unknown = true
+            }
+        }
+        return BluetoothConnectionDiagnostics.profileResult(remaining, unknown)
+    }
+
     private fun awaitDisconnected(
         context: Context,
         address: String,
         timeoutMillis: Long,
+        isCurrent: () -> Boolean,
     ): Boolean {
         val deadline = SystemClock.uptimeMillis() + timeoutMillis
         while (SystemClock.uptimeMillis() < deadline) {
+            if (!isCurrent() || Thread.currentThread().isInterrupted) return false
             if (connectedNames(context, address).isEmpty()) return true
             try {
                 Thread.sleep(120)
             } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
                 return false
             }
         }
-        return connectedNames(context, address).isEmpty()
+        return isCurrent() && !Thread.currentThread().isInterrupted && connectedNames(context, address).isEmpty()
     }
 
     private fun proxy(
@@ -164,7 +228,12 @@ object BtProfiles {
             Log.w(TAG, "proxy() 在主线程调用——getProfileProxy 回调会被阻塞，返回 null")
             return null
         }
-        if (!latch.await(1_200, TimeUnit.MILLISECONDS)) return null
+        try {
+            if (!latch.await(1_200, TimeUnit.MILLISECONDS)) return null
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return null
+        }
         return ref.get()?.also { synchronized(proxies) { proxies[profile] = it } }
     }
 
