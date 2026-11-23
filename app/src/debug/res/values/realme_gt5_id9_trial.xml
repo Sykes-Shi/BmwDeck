@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CarDeck BMW GT5测试</string>
+    <bool name="require_system_wifi_choice">true</bool>
+</resources>

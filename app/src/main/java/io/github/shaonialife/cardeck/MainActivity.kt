@@ -10,6 +10,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -27,6 +29,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
+import io.github.shaonialife.cardeck.airplay.AirPlayClient
 import io.github.shaonialife.cardeck.audio.AudioCaptureMode
 import io.github.shaonialife.cardeck.audio.AudioSender
 import io.github.shaonialife.cardeck.bt.BtProfiles
@@ -199,42 +202,108 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private sealed interface AudioPermissionUse {
+        data object Prepare : AudioPermissionUse
+        data object Connect : AudioPermissionUse
+        data class Restore(val client: AirPlayClient) : AudioPermissionUse
+    }
+
+    private var pendingAudioPermission: AudioPermissionUse? = null
+
     private val projectionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            // 拒绝也要消费请求，避免下次手动授权意外启动上一次取消的连接。
+            val use = pendingAudioPermission ?: AudioPermissionUse.Prepare
+            pendingAudioPermission = null
             val data = result.data
             if (result.resultCode != RESULT_OK || data == null) {
                 log("MODE: 投屏权限被拒绝（车机侧声音不可用）")
                 return@registerForActivityResult
             }
+            if (use is AudioPermissionUse.Restore && SessionController.connectedAudioClient() !== use.client) {
+                snack("原连接已结束，请在重新连接后开启声音")
+                return@registerForActivityResult
+            }
+            val previous = CarPlayService.mediaProjection
             // Android 14+ 顺序：先把结果交给服务，由服务升级 FGS 类型后调 getMediaProjection
             CarPlayService.pendingProjectionResult =
                 result.resultCode to data
             CarPlayService
                 .start(this)
-            log("MODE: ✓ 投屏权限已授予（重启手机后需重新授权）")
-            // 会话已在进行中授权（授权晚于连接）：等投影就绪后动态补启音频通道
-            Bg.run("audio-late-start") {
+            log("MODE: 已收到本次投屏授权")
+            if (use == AudioPermissionUse.Prepare) return@registerForActivityResult
+            Bg.run("audio-after-permission") {
                 val deadline = SystemClock.uptimeMillis() + 5_000L
+                var granted: MediaProjection? = null
                 while (SystemClock.uptimeMillis() < deadline) {
-                    if (CarPlayService.mediaProjection != null) break
+                    val projection = CarPlayService.mediaProjection
+                    if (projection != null && projection !== previous) {
+                        granted = projection
+                        break
+                    }
                     Thread.sleep(200)
                 }
-                if (CarPlayService.mediaProjection == null) {
-                    log("MODE: 投影 5 秒未就绪（服务异常？），音频通道本次未启动")
+                val projection = granted
+                if (projection == null) {
+                    log("MODE: 新投屏授权 5 秒内未就绪，未开启音频")
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) snack("投屏授权未就绪，请重试")
+                    }
                     return@run
                 }
-                SessionController.maybeStartAudioNow(applicationContext)
-                // 「启动连接」时选了开启声音、投屏授权在此刻才拿到：接着启动连接
-                if (pendingStartAfterProjection.compareAndSet(true, false)) {
-                    startConnectionNow()
+                when (use) {
+                    AudioPermissionUse.Connect -> runOnUiThread {
+                        if (!isFinishing && !isDestroyed &&
+                            CarPlayService.mediaProjection === projection &&
+                            !SessionController.isSessionRunning() && !SessionController.sessionStarting.get()
+                        ) {
+                            SessionController.audioEnabledForSession = true
+                            startConnectionNow()
+                        }
+                    }
+                    is AudioPermissionUse.Restore -> restoreAudio(use.client, projection)
+                    AudioPermissionUse.Prepare -> Unit
                 }
             }
         }
 
-    /** 投屏授权是「启动连接」的前置（选了开启声音且尚未授权）时置位。 */
-    private val pendingStartAfterProjection =
-        java.util.concurrent.atomic
-            .AtomicBoolean(false)
+    private fun requestAudioPermission(use: AudioPermissionUse) {
+        if (pendingAudioPermission != null) return
+        val manager = getSystemService(MediaProjectionManager::class.java)
+        if (manager == null) {
+            snack("当前无法申请投屏授权")
+            return
+        }
+        pendingAudioPermission = use
+        runCatching {
+            projectionLauncher.launch(manager.createScreenCaptureIntent())
+        }.onFailure {
+            pendingAudioPermission = null
+            log("MODE: 无法打开投屏授权（${it.javaClass.simpleName}）")
+            snack("无法打开投屏授权，请重试")
+        }
+    }
+
+    private fun requestAudioRecovery(client: AirPlayClient) {
+        if (SessionController.audioSender?.isRunning == true) {
+            snack("音频通道已启动。如车机无声，请保持连接并导出日志")
+            return
+        }
+        val projection = CarPlayService.mediaProjection
+        if (projection == null) {
+            requestAudioPermission(AudioPermissionUse.Restore(client))
+        } else {
+            Bg.run("restore-connected-audio") { restoreAudio(client, projection) }
+        }
+    }
+
+    private fun restoreAudio(client: AirPlayClient, projection: MediaProjection) {
+        val started = SessionController.restoreAudioInSession(applicationContext, client, projection)
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            snack(if (started) "音频通道已恢复，请确认车机有声" else "声音未恢复，请保持连接并导出日志")
+        }
+    }
 
     /**
      * 「启动连接」前的音频选择弹窗：
@@ -556,25 +625,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun beginWithAudio(enabled: Boolean) {
-        SessionController.audioEnabledForSession = enabled
         // 采音选择不改变 AAC/PCM 协商和车机音频档位。
         SessionController.audioPreferCompat = false
         if (!enabled) {
+            SessionController.audioEnabledForSession = false
             log("MODE: 本次连接仅推视频（未开启车机侧声音）")
             startConnectionNow()
             return
         }
         log("MODE: 采音方式=${AudioCaptureMode.diagnosticName}（车机声音）")
         if (CarPlayService.mediaProjection != null) {
+            SessionController.audioEnabledForSession = true
             log("MODE: 已选择开启声音（投屏权限已就绪）")
             startConnectionNow()
             return
         }
         // 本次投屏授权控制系统采音的同意与撤销生命周期。
         log("MODE: 开启声音需要本次投屏授权，授权后自动开始连接")
-        pendingStartAfterProjection.set(true)
-        val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-        projectionLauncher.launch(manager.createScreenCaptureIntent())
+        requestAudioPermission(AudioPermissionUse.Connect)
     }
 
     /** 「启动连接」主体（权限检查留在这里；会话启动交给 [SessionController]，幂等不双开）。 */
@@ -915,10 +983,13 @@ class MainActivity : AppCompatActivity() {
         // 目标车机选择：配对了多台车机时指定唯一目标（只向它发请求/只接受它连入）
         btnPickTarget.setOnClickListener { showTargetPicker() }
 
-        // 系统声音仅保留本次投屏同意与撤销，不申请应用端麦克风权限。
+        // 已连接时明确恢复当前会话的声音，独立于最初是否选择「仅视频」。
         btnAudio.setOnClickListener {
-            val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-            projectionLauncher.launch(manager.createScreenCaptureIntent())
+            val client = SessionController.connectedAudioClient()
+            if (client != null) requestAudioRecovery(client) else requestAudioPermission(AudioPermissionUse.Prepare)
+        }
+        audioTag.setOnClickListener {
+            SessionController.connectedAudioClient()?.let(::requestAudioRecovery)
         }
 
         // ---- 车机显示 ----
@@ -1223,7 +1294,9 @@ class MainActivity : AppCompatActivity() {
             )!!
         DrawableCompat.setTint(icon.mutate(), getColor(if (on) R.color.m3_ok else R.color.m3_outline))
         audioTag.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null)
-        audioTag.text = if (on) "车机侧声音 · 开启" else "车机侧声音 · 关闭"
+        audioTag.text = if (on) "车机声音 · 通道已启动" else "车机声音 · 点此恢复"
+        audioTag.isClickable = !on
+        audioTag.isFocusable = !on
     }
 
     /**
@@ -1305,7 +1378,15 @@ class MainActivity : AppCompatActivity() {
         }
         val projectionReady =
             CarPlayService.mediaProjection != null
-        if (projectionReady) {
+        if (heroState == HeroState.CONNECTED && SessionController.audioSender?.isRunning != true) {
+            btnAudio.text = "恢复声音"
+            btnAudio.setTextColor(getColor(R.color.m3_primary))
+            audioDesc.text = if (projectionReady) {
+                "可恢复当前连接的声音"
+            } else {
+                "投屏授权已结束或未开启，点此重新授权"
+            }
+        } else if (projectionReady) {
             btnAudio.text = "已授权"
             btnAudio.setTextColor(getColor(R.color.m3_ok))
             audioDesc.text = "投屏权限已就绪 · 连接时可选开启"
@@ -1907,9 +1988,10 @@ class MainActivity : AppCompatActivity() {
         snack("正在采集声音诊断并导出日志，请稍候…")
         Bg.run("export-log") {
             try {
-                val diagnostics =
+                val audioDiagnostics =
                     runCatching { io.github.shaonialife.cardeck.media.AudioDiagnostics.collect(applicationContext) }
                         .getOrElse { "AUDIO-DIAG: unavailable=${it.javaClass.simpleName}" }
+                val diagnostics = "${SessionController.projectionRouteDiagnostics()}\n$audioDiagnostics"
                 val result =
                     runCatching { LogExporter.export(applicationContext, SessionController.logText(), scope, diagnostics) }
                         .getOrNull()

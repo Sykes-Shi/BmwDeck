@@ -203,6 +203,9 @@ object SessionController {
     @Volatile private var vpnCoexistenceController: VpnCoexistenceController? = null
 
     internal fun projectionWifi(): android.net.Network? = wifiConnector?.currentNetwork
+
+    internal fun projectionRouteDiagnostics(): String =
+        wifiConnector?.routeDiagnostics("export") ?: "FIELD-NET: stage=export projection=none"
     internal fun projectionNetworkBlocked(handle: Long): Boolean = vpnCoexistenceController?.isBlocked(handle) == true
 
     /**
@@ -681,24 +684,28 @@ object SessionController {
         appContext?.let { ctx -> AppOrientationCompat.resetAllAsync(ctx, ::appendLog) }
     }
 
-    /** 会话已建立且投影就绪、但音频尚未启动时，动态补启（投影授权晚于连接的场景）。 */
-    @Synchronized
-    fun maybeStartAudioNow(context: Context) {
-        val client =
-            currentClient ?: run {
-                appendLog("MODE: 投屏已就绪（当前无会话——下次连接时自动启用音频）")
-                return
-            }
-        val secret = currentSharedSecret
-        if (secret == null) {
-            appendLog("MODE: 明文会话（未配对）无共享密钥——不补启音频")
-            return
+    internal fun connectedAudioClient(): AirPlayClient? =
+        currentClient?.takeIf {
+            !it.cancelled && !connectCancelled && videoSender?.isRunning == true
         }
-        if (client.cancelled || connectCancelled || currentClient !== client || videoSender?.isRunning != true) return
-        if (audioSender?.isRunning == true) return
-        appendLog("MODE: 会话进行中，动态补启音频通道…")
-        // 与初次连接共用 SETUP → RECORD → 捕获/同步，避免动态补启遗漏 RECORD。
-        startAudioChannel(context, client, secret, currentAudioHost)
+
+    /** 只对用户发起恢复时的会话补启声音，保留其视频连接。 */
+    @Synchronized
+    internal fun restoreAudioInSession(
+        context: Context,
+        client: AirPlayClient,
+        projection: android.media.projection.MediaProjection,
+    ): Boolean {
+        if (connectedAudioClient() !== client || CarPlayService.mediaProjection !== projection) {
+            appendLog("AUDIO: 手动恢复已过期（车机连接或投屏授权已变化）")
+            return false
+        }
+        if (audioSender?.isRunning == true) return true
+        audioEnabledForSession = true
+        appendLog("AUDIO: 手动恢复当前连接的声音")
+        return startAudioChannel(context, client, currentSharedSecret, currentAudioHost, projection).also { started ->
+            appendLog("AUDIO: 手动恢复结果 channelStarted=$started")
+        }
     }
 
     /**
@@ -812,7 +819,11 @@ object SessionController {
         val local = connector.connectedNetwork(ssid, systemSsid, allowSystemWifi = false)
         val candidate = local ?: connector.connectedNetwork(ssid, systemSsid, allowSystemWifi = true) ?: return null
         if (invitedAddress != null && !connector.hasLocalAddress(candidate, invitedAddress)) return null
-        if (local == null && !wifiJoins.mayReuseSystemWifi(flight) { connector.hasIndependentInternet(candidate, beforeDedicatedRequest) }) return null
+        val requireUserChoice = appContext?.resources?.getBoolean(R.bool.require_system_wifi_choice) == true
+        if (local == null && !wifiJoins.mayReuseSystemWifi(flight) {
+                !requireUserChoice && connector.hasIndependentInternet(candidate, beforeDedicatedRequest)
+            }
+        ) return null
         if (!bindCarWifiAndRegister(ssid, flight, candidate, allowSystemWifi = local == null)) return null
         return connector.currentNetwork?.let { WifiCarPlayConnector.JoinResult.Joined(it) }
     }
@@ -1016,7 +1027,7 @@ object SessionController {
                 val associated = isWifiJoinCurrent(flight) && alreadyAssociated(wifi.ssid, shellReady)
                 if (associated) choose(DialogSpec(
                     title = "使用已连接的车机热点",
-                    message = "手机已连上宝马热点。使用 Spotify 等需要 VPN 的应用，可重试专用连接，让手机保留移动数据上网。选择使用当前热点时，VPN 可能随手机切到车机 Wi-Fi。",
+                    message = "手机已连上宝马热点。若此时手机不能上网，请选「重试专用连接」，让系统另选上网网络。选择使用当前热点可能影响手机上网。",
                     positive = "使用当前热点",
                     negative = "重试专用连接",
                 ))?.not() else choose(DialogSpec(
@@ -1504,6 +1515,7 @@ object SessionController {
         client: AirPlayClient,
         sharedSecret: ByteArray?,
         host: String?,
+        projection: android.media.projection.MediaProjection? = CarPlayService.mediaProjection,
     ): Boolean {
         fun isLiveSession(): Boolean =
             currentClient === client && !client.cancelled && !connectCancelled && videoSender?.isRunning == true
@@ -1528,7 +1540,6 @@ object SessionController {
             appendLog("AUDIO: 无接收端可用地址，跳过音频通道")
             return false
         }
-        val projection = CarPlayService.mediaProjection
         if (projection == null) {
             appendLog(
                 "AUDIO: 缺少本次投屏授权——音频通道未启动。" +
@@ -1536,6 +1547,7 @@ object SessionController {
             )
             return false
         }
+        if (CarPlayService.mediaProjection !== projection) return false
         fun isCurrentActivation(): Boolean =
             isLiveSession() && audioEnabledForSession && CarPlayService.mediaProjection === projection
 

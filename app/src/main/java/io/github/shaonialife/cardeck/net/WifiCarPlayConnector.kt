@@ -490,10 +490,40 @@ class WifiCarPlayConnector(
                     }.getOrElse { error ->
                         "WiFi: 网络快照不可用（${error.javaClass.simpleName}）；连接流程不变"
                     }
-                if (binding.isBound(owner, expectedNetwork)) log(summary)
+                if (binding.isBound(owner, expectedNetwork)) {
+                    log(summary)
+                    log(routeDiagnostics("joined"))
+                }
             }
         }
     }
+
+    /** 当次复测只保留网络类别和能力，便于转交日志。 */
+    @Suppress("DEPRECATION")
+    fun routeDiagnostics(stage: String): String = runCatching {
+        val active = connectivityManager.activeNetwork
+        val bound = currentNetwork
+        val activeCaps = active?.let(connectivityManager::getNetworkCapabilities)
+        val boundCaps = bound?.let(connectivityManager::getNetworkCapabilities)
+        val defaultOnCarLink = bound != null && active != null &&
+            (active == bound ||
+                (activeCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+                    ConnectedWifiSelection.sameLink(
+                        connectivityManager.getLinkProperties(bound),
+                        connectivityManager.getLinkProperties(active),
+                    )))
+        val validatedMobile = connectivityManager.allNetworks.any { network ->
+            val caps = connectivityManager.getNetworkCapabilities(network) ?: return@any false
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        }
+        "FIELD-NET: stage=$stage defaultOnCarLink=$defaultOnCarLink validatedMobile=$validatedMobile " +
+            "appDefault=[${networkCapabilitySummary(activeCaps)}] " +
+            "projection=[${networkCapabilitySummary(boundCaps)}]"
+    }.getOrElse { "FIELD-NET: stage=$stage unavailable=${it.javaClass.simpleName}" }
 
     private fun networkCapabilitySummary(capabilities: NetworkCapabilities?): String {
         if (capabilities == null) return "capabilities=unavailable"

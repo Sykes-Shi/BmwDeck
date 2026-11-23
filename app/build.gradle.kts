@@ -42,8 +42,8 @@ android {
         }
         debug {
             // Keep local developer builds separate from the public trial.
-            applicationIdSuffix = ".dev"
-            versionNameSuffix = "-dev"
+            applicationIdSuffix = ".realmegt5id9test"
+            versionNameSuffix = "-realme-gt5-id9-test"
         }
     }
 
@@ -72,7 +72,7 @@ android {
 // Developer variant stays separate; public release versionCode is defined above.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(164) }
+        variant.outputs.forEach { output -> output.versionCode.set(172) }
     }
 }
 
