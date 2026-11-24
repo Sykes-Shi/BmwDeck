@@ -1,14 +1,16 @@
-# CarDeck-BMW
+# BmwDeck
 
-CarDeck-BMW 基于开源项目 [CarDeck](https://github.com/shaonialife/cardeck)，针对宝马 iDrive 7 车机的无线 CarPlay 连接与使用体验进行优化。项目运行在 Android 手机上，通过 CarPlay 将手机应用界面投送至车机。
+BmwDeck（原 CarDeck-BMW）基于开源项目 [CarDeck](https://github.com/shaonialife/cardeck)，针对宝马 iDrive 7 车机的无线 CarPlay 连接与使用体验进行优化。项目运行在 Android 手机上，通过 CarPlay 将手机应用界面投送至车机。
 
-CarDeck-BMW is an experimental Android project based on [CarDeck](https://github.com/shaonialife/cardeck), optimized for BMW iDrive 7 head units. It builds on the upstream project's wireless CarPlay sender and adds BMW-specific compatibility and interface work.
+BmwDeck is an experimental Android project based on [CarDeck](https://github.com/shaonialife/cardeck), optimized for BMW iDrive 7 head units. It builds on the upstream project's wireless CarPlay sender and adds BMW-specific compatibility and interface work.
 
 ## 新手入口
 
+- [V55 手机界面与系统状态栏更新说明](https://github.com/Sykes-Shi/BmwDeck/releases/tag/v55-update-notes) · 本次仅发布文字说明。
+
 - [安装与首次连接教程](docs/QUICKSTART.md)：安装到安卓手机 → 启动 Shizuku → 配对宝马 → 启动连接。
-- [版本更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Sykes-Shi/CarDeck-BMW/issues)
-- [下载 V47 中控公开试用版 APK](https://github.com/Sykes-Shi/CarDeck-BMW/releases/download/v47-public-preview/CarDeck-BMW-v47-public.apk) · [发布说明与校验值](https://github.com/Sykes-Shi/CarDeck-BMW/releases/tag/v47-public-preview)
+- [版本更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Sykes-Shi/BmwDeck/issues)
+- [下载此前发布的 V47 中控公开试用版 APK](https://github.com/Sykes-Shi/BmwDeck/releases/download/v47-public-preview/CarDeck-BMW-v47-public.apk) · [发布说明与校验值](https://github.com/Sykes-Shi/BmwDeck/releases/tag/v47-public-preview)
 - 已安装 GitHub V46 公开版的用户，可直接安装 V47 保留设置。原来使用内部中控试用包的用户，请使用同渠道的 V47 覆盖升级。两个渠道的签名不同，跨渠道更换涉及卸载和清除应用数据。
 
 ## 车机兼容性：社区试用反馈（2026 年 11 月）
@@ -16,15 +18,15 @@ CarDeck-BMW is an experimental Android project based on [CarDeck](https://github
 - 据抖音群友反馈，iDrive 6（ID6）和 iDrive 8.5 各有成功连接的个例；这不代表同代车机或全部功能均已验证兼容。
 - **ID6 补充**：另有一位抖音视频评论区用户反馈，其原车带无线 CarPlay 的 ID6 已实现安卓手机直连。
 
-这些是用户反馈的连接个例；车机固件、手机型号、系统版本及其他功能尚未全面验证，不代表对应代际的所有车型均可用，也不代表原车不带无线 CarPlay 的车机可用。本项目仍主要围绕 iDrive 7 优化，更多车型与手机组合正在探索。欢迎在 [Issues](https://github.com/Sykes-Shi/CarDeck-BMW/issues) 补充配置与测试结果。
+这些是用户反馈的连接个例；车机固件、手机型号、系统版本及其他功能尚未全面验证，不代表对应代际的所有车型均可用，也不代表原车不带无线 CarPlay 的车机可用。本项目仍主要围绕 iDrive 7 优化，更多车型与手机组合正在探索。欢迎在 [Issues](https://github.com/Sykes-Shi/BmwDeck/issues) 补充配置与测试结果。
 
 ## 项目状态
 
 当前仓库源码对应 **V47 中控公开试用版**，在 V39 中控版本基础上继续优化，仍在开发和实车验证中。宝马车型、车机版本和手机系统存在差异，连接、声音、网络、导航和按键功能的表现可能不同。请在停车时完成配置和操作，并保留原车导航等备用方式。完整说明见 [免责声明](DISCLAIMER.md)。
 
-仪表导航测试版作为独立版本开发，使用不同的应用 ID；其源码见 [cluster-test 分支](https://github.com/Sykes-Shi/CarDeck-BMW/tree/cluster-test)，相关功能仍在实验与验证中。两版应分别安装授权，使用时一次只运行并连接其中一版。
+仪表导航测试版作为独立版本开发，使用不同的应用 ID；其源码见 [cluster-test 分支](https://github.com/Sykes-Shi/BmwDeck/tree/cluster-test)，相关功能仍在实验与验证中。两版应分别安装授权，使用时一次只运行并连接其中一版。
 
-各诊断版本的主要变化见 [版本更新记录](CHANGELOG.md)。新手先安装上面的中控公开试用版；反馈问题请使用 [GitHub Issues](https://github.com/Sykes-Shi/CarDeck-BMW/issues)。正式签名只标识本项目的发布来源，不代表宝马/Apple 认证或生产级稳定性。
+各诊断版本的主要变化见 [版本更新记录](CHANGELOG.md)。新手先安装上面的中控公开试用版；反馈问题请使用 [GitHub Issues](https://github.com/Sykes-Shi/BmwDeck/issues)。正式签名只标识本项目的发布来源，不代表宝马/Apple 认证或生产级稳定性。
 
 ## 主要功能与优化
 
