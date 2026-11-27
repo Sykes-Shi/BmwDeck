@@ -1,9 +1,10 @@
 package io.github.shaonialife.cardeck.render
 
+import io.github.shaonialife.cardeck.media.CarVideoSources
 import kotlin.math.abs
 
 internal object VideoBarControls {
-    val packages = setOf("com.ukids.client.phone", "com.youku.phone")
+    val packages = CarVideoSources.labels.keys
     const val WIDTH = 96
     const val HEIGHT = 48
 

@@ -28,14 +28,14 @@ internal data class OnlineTrack(
     companion object {
         private val spotifyRecommendationLabels = setOf("为你推荐", "為你推薦")
         // Limit outbound metadata to the tested music players, not video, navigation or browsers.
-        private val musicPlayers = setOf("com.netease.cloudmusic", "com.spotify.music", "com.tencent.qqmusic", "com.kugou.android")
+        private val musicPlayers = setOf(NetEaseCarEdition.MOBILE, NetEaseCarEdition.CAR, "com.spotify.music", "com.tencent.qqmusic", "com.kugou.android")
 
         fun of(pkg: String?, title: String?, artist: String?, album: String?, durationMs: Long, mediaId: String? = null): OnlineTrack? {
             if (pkg !in musicPlayers || title.isNullOrBlank() || artist.isNullOrBlank()) return null
             val fields = listOf(title, artist, album.orEmpty())
             if (fields.any { it.length > 256 || it.any(Char::isISOControl) }) return null
             // The player ID is only a local tie-breaker among results returned by the public song search.
-            val id = if (pkg == "com.netease.cloudmusic" && mediaId != null && mediaId.length in 1..16 &&
+            val id = if (NetEaseCarEdition.owns(pkg) && mediaId != null && mediaId.length in 1..16 &&
                 mediaId.all { it in '0'..'9' }) mediaId.toLongOrNull()?.takeIf { it > 0 } else null
             return OnlineTrack(pkg!!, title.trim(), artist.trim(), album.orEmpty().trim(), durationMs.coerceAtLeast(0), id)
         }
@@ -147,7 +147,7 @@ internal enum class OnlineLyricState(val hint: String?, val ttlMs: Long) {
     SEARCHING("正在查找歌词…", 0),
     FOUND(null, 24 * 3_600_000L),
     ABSENT("未找到匹配这首歌的歌词", 3_600_000L),
-    NO_NETWORK("CarDeck 暂未找到可用上网通道，歌词稍后重试", 10_000L),
+    NO_NETWORK("BmwDeck 暂未找到可用上网通道，歌词稍后重试", 10_000L),
     TIMEOUT("歌词查询超时，稍后重试", 12_000L),
     FAILURE("歌词服务暂时不可用，稍后重试", 20_000L),
     LIMITED("歌词服务请求受限，稍后重试", 0),
@@ -156,7 +156,7 @@ internal enum class OnlineLyricState(val hint: String?, val ttlMs: Long) {
 internal enum class LyricProvider { LRCLIB, NETEASE }
 
 internal fun lyricProvidersFor(pkg: String): List<LyricProvider> =
-    if (pkg == "com.netease.cloudmusic") listOf(LyricProvider.NETEASE, LyricProvider.LRCLIB)
+    if (NetEaseCarEdition.owns(pkg)) listOf(LyricProvider.NETEASE, LyricProvider.LRCLIB)
     else listOf(LyricProvider.LRCLIB, LyricProvider.NETEASE)
 
 internal fun OnlineLyricState.isTransientFailure() =

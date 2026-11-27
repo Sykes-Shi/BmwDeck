@@ -306,7 +306,7 @@ object OnlineLyrics {
                 conn.useCaches = false
                 // Do not share global WebView cookies, a music account or authorization headers.
                 conn.setRequestProperty("Cookie", "")
-                conn.setRequestProperty("User-Agent", "CarDeck-BMW/$version (based on https://github.com/shaonialife/cardeck)")
+                conn.setRequestProperty("User-Agent", "BmwDeck/$version (based on https://github.com/shaonialife/cardeck)")
                 conn.setRequestProperty("Accept", "application/json")
                 synchronized(OnlineLyrics) {
                     checkLive()

@@ -38,13 +38,6 @@ class ScreenDimmerTest {
     }
 
     @Test
-    fun phoneNavigationSuppressesAutoDimWithoutChangingItsSavedPreference() {
-        assertFalse(ScreenDimmer.shouldAutoDim(enabled = true, sessionActive = true, attached = true, phoneNavigation = true))
-        // 下次连接关闭手机导航模式，原自动暗幕偏好即恢复。
-        assertTrue(ScreenDimmer.shouldAutoDim(enabled = true, sessionActive = true, attached = true, phoneNavigation = false))
-    }
-
-    @Test
     fun dimRequiresConfirmedInteractiveAndUnlockedState() {
         for (interactive in listOf(true, false, null)) {
             for (keyguard in listOf(true, false, null)) {

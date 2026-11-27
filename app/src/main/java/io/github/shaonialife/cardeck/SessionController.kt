@@ -260,6 +260,7 @@ object SessionController {
     var currentClient: AirPlayClient? = null
 
     private val userScreenRefreshBusy = AtomicBoolean(false)
+    private val bmwPageSequence = AtomicLong()
     @Volatile private var reconnectBorrowedScreen: ((AirPlayClient, Long) -> Unit)? = null
 
     fun canRefreshBmwScreen(): Boolean = currentClient?.let {
@@ -271,15 +272,17 @@ object SessionController {
         val sender = videoSender ?: return
         val revision = client.screenRevisionAtTap() ?: return
         if (!canRefreshBmwScreen() || !userScreenRefreshBusy.compareAndSet(false, true)) return
+        val intent = bmwPageSequence.incrementAndGet()
+        val presentation = VirtualLauncher.presentationRevision()
         Bg.run("bmw-user-screen-return") {
             try {
-                val reason = refreshBmwScreen(client, sender, revision, userRequested = true)
+                val reason = refreshBmwScreen(client, sender, revision, userRequested = true, pageSequence = intent, presentation = presentation)
                 if (currentClient === client && !client.cancelled && !connectCancelled) {
                     if (reason in setOf("awaiting_screen_return", "loan_refresh_failed") &&
                         offerBmwScreenReconnect(client, sender, revision)
                     ) return@run
                     val message = when (reason) {
-                        "frame_requested" -> "已请求刷新投屏画面"
+                        "frame_requested" -> "已请求返回 BmwDeck 桌面"
                         "receiver_owns_screen", "native_activity_active" ->
                             "宝马仍在使用屏幕。请在电话或倒车结束后，在 iDrive 点「Apple CarPlay」"
                         else -> "车机画面尚未恢复，请在 iDrive 点「Apple CarPlay」"
@@ -322,13 +325,33 @@ object SessionController {
         return queued
     }
 
-    private fun refreshBmwScreen(client: AirPlayClient, sender: VideoSender, revision: Long, userRequested: Boolean): String {
+    private fun queueBmwDesktop(client: AirPlayClient, sender: VideoSender, revision: Long, sequence: Long, presentation: Long) {
+        val generation = VirtualLauncher.sessionGeneration()
+        fun current() = currentClient === client && !client.cancelled && !connectCancelled && videoSender === sender &&
+            sender.isRunning && client.controllerInputRevision == revision && client.firstPictureGrantSince != null &&
+            bmwPageSequence.get() == sequence && VirtualLauncher.isCurrentSession(generation)
+        if (!current()) return
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (current() && VirtualLauncher.presentationRevision() == presentation) {
+                VirtualLauncher.openControllerAppList(::current)
+                if (current()) sender.requestKeyFrame()
+                appendLog("BMW-SCREEN: 已请求显示 BmwDeck 桌面 revision=$revision")
+            }
+        }
+    }
+
+    private fun refreshBmwScreen(client: AirPlayClient, sender: VideoSender, revision: Long, userRequested: Boolean, pageSequence: Long? = null, presentation: Long? = null): String {
         fun live() = currentClient === client && !client.cancelled && !connectCancelled && videoSender === sender && sender.isRunning
         if (!live()) return "session_changed"
         val result = client.refreshReleasedScreen(revision, userRequested)
         val granted = result.controllerRevision
         val refreshed = result.accepted && granted != null && live() && client.controllerInputRevision == granted && sender.requestKeyFrame()
-        if (result.accepted && granted != null && live()) dispatchReturnedMedia(client, sender, granted)
+        if (result.accepted && granted != null && live()) {
+            if (userRequested && pageSequence != null && presentation != null) {
+                client.rememberBorrowedMedia(null)
+                queueBmwDesktop(client, sender, granted, pageSequence, presentation)
+            } else dispatchReturnedMedia(client, sender, granted)
+        }
         appendLog("BMW-SCREEN: refresh user=$userRequested revision=$revision reason=${result.reason} keyFrame=$refreshed")
         return if (refreshed) "frame_requested" else result.reason
     }
@@ -534,6 +557,15 @@ object SessionController {
             bluetoothServer?.isRunning == true ||
             bluetoothClient?.isRunning == true
 
+    private fun displayStartupHint(context: Context): String =
+        when (ShizukuGate.state(context)) {
+            ShizukuGate.State.NOT_INSTALLED -> "请先安装并启动 Shizuku，然后重新连接 BmwDeck"
+            ShizukuGate.State.NOT_RUNNING -> "手机上的 Shizuku 已断开，请打开 Shizuku 启动服务后重新连接 BmwDeck"
+            ShizukuGate.State.UNAUTHORIZED -> "请在 Shizuku 的「授权应用」中允许 BmwDeck，然后重新连接"
+            ShizukuGate.State.READY -> if (CarInputClient.isReady()) "车机桌面启动失败，请取消本次连接后重试"
+                else "BmwDeck 未接通 Shizuku，请确认手机上的服务已启动，再重新连接"
+        }
+
     /**
      * 「启动连接」主体（权限检查由 Activity 完成后调用）：前台保活服务 + 双向蓝牙。
      * 幂等：已有会话时 BT 组件的 start() 自行短路，不会双开。
@@ -686,7 +718,7 @@ object SessionController {
     fun maybeStartAudioNow(context: Context) {
         val client =
             currentClient ?: run {
-                appendLog("MODE: 投屏已就绪（当前无会话——下次连接时自动启用音频）")
+                appendLog("MODE: 本次投屏授权已就绪（连接时按声音选择使用）")
                 return
             }
         val secret = currentSharedSecret
@@ -898,7 +930,7 @@ object SessionController {
                         "系统里保存过 \"$ssid\"。保留会让手机在进入范围时自动连接它，" +
                             "若该热点没有互联网，可能导致手机无法使用移动数据。\n\n" +
                             "选「清除保存」会移除这个 WLAN 配置，手机可能先断开车机 Wi-Fi，" +
-                            "再由 CarDeck 申请投屏连接。选择保留也会重试专用连接。",
+                            "再由 BmwDeck 申请投屏连接。选择保留也会重试专用连接。",
                     positive = "清除保存",
                     negative = "保留并重试专用连接",
                 ),
@@ -1532,7 +1564,7 @@ object SessionController {
         if (projection == null) {
             appendLog(
                 "AUDIO: 缺少本次投屏授权——音频通道未启动。" +
-                    "现在点「申请投屏权限」也可即时补启（无需重连）；注意「断开连接」会停服务并连带失效投屏授权",
+                    "在手机「连接声音」的设置中申请本次共享授权即可补启声音；断开连接会结束本次授权",
             )
             return false
         }
@@ -2171,6 +2203,28 @@ object SessionController {
                         return@run
                     }
 
+                    // Joining the car's Wi-Fi can disconnect Shizuku after the phone's initial
+                    // readiness check. Wait before pairing so the receiver's screen watchdog
+                    // does not run while we are waiting for a local Android service.
+                    if (!CarInputClient.isReady() || ShizukuGate.state(context) != ShizukuGate.State.READY) {
+                        val waiting = "正在接回手机的 Shizuku；若服务已停止，请在 Shizuku 中启动，BmwDeck 会继续连接"
+                        phaseHint = waiting
+                        appendLog("MODE: 车机网络已就绪，等待桌面服务重新接通")
+                        uiHintSink?.invoke(waiting)
+                        val ready = CarInputClient.awaitReady(context, 45_000L) {
+                            !attemptActive() || !sessionAttempts.matches(attempt, wifiConnector?.currentNetwork)
+                        }
+                        requireAttempt()
+                        if (!ready || ShizukuGate.state(context) != ShizukuGate.State.READY) {
+                            val hint = displayStartupHint(context)
+                            phaseHint = hint
+                            uiHintSink?.invoke(hint)
+                            appendLog("MODE: 桌面服务未就绪，本轮未开始投屏；$hint")
+                            return@run
+                        }
+                        appendLog("MODE: 桌面服务已接回，继续本轮 BmwDeck 连接")
+                    }
+
                     fun newClient() =
                         AirPlayClient(
                             effectiveEndpoint,
@@ -2219,7 +2273,7 @@ object SessionController {
                                 if (currentClient !== created || !sessionAttempts.owns(attempt) ||
                                     videoSender !== liveVideo || audioSender !== liveAudio
                                 ) return@ended
-                                if (!liveVideo.isRunning || !endSnapshotTaken.compareAndSet(false, true)) return@ended
+                                if (!endSnapshotTaken.compareAndSet(false, true)) return@ended
                                 // 在后续拆流清空统计之前取快照；不改系统设置或启动重连。
                                 appendLog("SESSION-DIAG: first_control_end ${liveVideo.transportDiagnosticLine()}")
                                 liveAudio?.captureDiagnosticLines()?.forEach { line ->
@@ -2378,7 +2432,6 @@ object SessionController {
                             val uiRecoveryClient = client
                             val uiRecoveryPolicy = BmwRequestUiRecoveryPolicy(uiRecoveryClient.receiverIdentity())
                             val isBmw = BmwControlIapCompatibility.matches(uiRecoveryClient.receiverIdentity())
-                            val shortcutSequence = AtomicLong()
                             val shortcutScreenChanges = AtomicLong()
                             val observations = BmwShortcutObservations()
                             val voiceKey = SteeringVoiceKey()
@@ -2429,13 +2482,14 @@ object SessionController {
                                     "requestUI" -> {
                                         val liveSession = currentClient === uiRecoveryClient &&
                                             !uiRecoveryClient.cancelled && !connectCancelled
-                                        val sequence = shortcutSequence.incrementAndGet()
+                                        val sequence = if (isBmw && liveSession) bmwPageSequence.incrementAndGet() else bmwPageSequence.get()
+                                        val presentation = VirtualLauncher.presentationRevision()
                                         val target = if (liveSession && isBmw) BmwShortcutTarget.from(command) else null
                                         val sender = videoSender
                                         val inputRevision = uiRecoveryClient.controllerInputRevision
                                         val requestParams = command["params"] as? Map<*, *>
                                         val bareReturn = requestParams?.size == 1 && requestParams["url"] == ""
-                                        if (isBmw && liveSession && !bareReturn) {
+                                        if (isBmw && liveSession) {
                                             val media = target?.takeIf { inputRevision == null && it.defaultPage == CarShortcut.MEDIA &&
                                                 !CarShortcutLearning.isCalibrating(generation) }
                                             uiRecoveryClient.rememberBorrowedMedia(media?.token)
@@ -2447,7 +2501,7 @@ object SessionController {
                                                 sender?.isRunning == true && VirtualLauncher.isCurrentSession(generation) &&
                                                 uiRecoveryClient.controllerInputRevision == revision
                                         fun dispatch(page: CarShortcut?, revision: Long?) {
-                                            if (page == null || revision == null || sequence != shortcutSequence.get() || !ownsShortcut(revision)) return
+                                            if (page == null || revision == null || sequence != bmwPageSequence.get() || !ownsShortcut(revision)) return
                                             val queued = VirtualLauncher.submitShortcut(page) { ownsShortcut(revision) }
                                             appendLog("BMW-KEY: page=${page.name} queued=$queued")
                                         }
@@ -2458,15 +2512,23 @@ object SessionController {
                                         // Learn when the event arrives. A cooldown for restoring video must not
                                         // swallow a second, distinct key while CarDeck still owns the screen.
                                         dispatch(resolveTarget(inputRevision), inputRevision)
+                                        // A request for the launcher is a page selection even during video recovery cooldown.
+                                        if (isBmw && bareReturn && sender != null && inputRevision != null && ownsShortcut(inputRevision)) {
+                                            queueBmwDesktop(uiRecoveryClient, sender, inputRevision, sequence, presentation)
+                                        }
                                         if (isBmw) {
                                             val kind = if (target == null) "other" else target.defaultPage?.name ?: "calibration_candidate"
                                             appendLog("BMW-KEY: requestUI target=$kind")
                                         }
                                         val paramsSummary = summarizeModeCommand(command)
-                                        val decision = uiRecoveryPolicy.decide("requestUI", liveSession)
+                                        val explicitReturn = bareReturn || target?.defaultPage != null
+                                        val modeRevision = uiRecoveryClient.captureUiRestoreRevision()
+                                        val nativeReturn = uiRecoveryClient.needsExplicitScreenReturn
+                                        val decision = uiRecoveryPolicy.decide("requestUI", liveSession,
+                                            awaitingExplicitReturn = nativeReturn && !explicitReturn,
+                                            nativeReturnRevision = modeRevision.takeIf { nativeReturn && explicitReturn })
                                         if (decision.allowed) {
                                             // 排队期间若又发生倒车借屏或模式转换，旧请求不能恢复新状态。
-                                            val modeRevision = uiRecoveryClient.captureUiRestoreRevision()
                                             // Control 请求可能等待响应，不能阻塞 EVENT 的后续读取和 ACK。
                                             Bg.run("bmw-request-ui") {
                                                 try {
@@ -2474,16 +2536,21 @@ object SessionController {
                                                         uiRecoveryClient.cancelled || connectCancelled
                                                     ) return@run
                                                     val expectedVideoSender = videoSender
-                                                    val recovery = uiRecoveryClient.restoreRequestedUi(modeRevision, refreshLoan = bareReturn || target != null)
+                                                    val recovery = uiRecoveryClient.restoreRequestedUi(modeRevision,
+                                                        refreshLoan = bareReturn || target != null, explicitReturn = explicitReturn)
                                                     val stillLive = currentClient === uiRecoveryClient &&
                                                         !uiRecoveryClient.cancelled && !connectCancelled
+                                                    val grantedRevision = recovery.controllerRevision
                                                     val keyFrameRequested = stillLive && videoSender === expectedVideoSender &&
-                                                        recovery.accepted &&
+                                                        recovery.accepted && grantedRevision != null && uiRecoveryClient.controllerInputRevision == grantedRevision &&
                                                         expectedVideoSender?.requestKeyFrame() == true
-                                                    val mediaQueued = recovery.accepted && stillLive && expectedVideoSender != null && recovery.controllerRevision != null &&
+                                                    if (bareReturn && inputRevision == null && recovery.accepted && grantedRevision != null && expectedVideoSender != null) {
+                                                        queueBmwDesktop(uiRecoveryClient, expectedVideoSender, grantedRevision, sequence, presentation)
+                                                    }
+                                                    val mediaQueued = !bareReturn && recovery.accepted && stillLive && expectedVideoSender != null && recovery.controllerRevision != null &&
                                                         dispatchReturnedMedia(uiRecoveryClient, expectedVideoSender, recovery.controllerRevision)
                                                     if (recovery.accepted && inputRevision == null && recovery.reason == "bmw_take_then_request_ui" &&
-                                                        !mediaQueued && sequence == shortcutSequence.get()
+                                                        !mediaQueued && sequence == bmwPageSequence.get()
                                                     ) {
                                                         val restoredRevision = recovery.controllerRevision
                                                         dispatch(resolveTarget(restoredRevision), restoredRevision)
@@ -2637,13 +2704,17 @@ object SessionController {
                                         if (liveSession) {
                                             // Revoke queued page opens as soon as a screen change arrives,
                                             // even if the control channel is still completing an earlier ACK.
-                                            val resources = (command["params"] as? Map<*, *>)?.get("resources") as? List<*>
-                                            if (resources == null || resources.any { ((it as? Map<*, *>)?.get("resourceID") as? Number)?.toLong() != 2L }) {
+                                            val params = command["params"] as? Map<*, *>
+                                            val resources = params?.get("resources") as? List<*>
+                                            if (resources == null || resources.any { ((it as? Map<*, *>)?.get("resourceID") as? Number)?.toLong() != 2L } ||
+                                                !(params?.get("appStates") as? List<*>).isNullOrEmpty()
+                                            ) {
                                                 shortcutScreenChanges.incrementAndGet()
+                                                if (isBmw) bmwPageSequence.incrementAndGet()
                                             }
                                             appendLog("EVENT: 车机请求 changeModes → 按当前借用状态响应 ${summarizeModeCommand(command)}")
                                             val expectedVideoSender = videoSender
-                                            val update = uiRecoveryClient.respondToModeChange(command)
+                                            val update = uiRecoveryClient.respondToModeChange(command, expectedVideoSender?.hasSentPicture == true)
                                             val stillLive = currentClient === uiRecoveryClient &&
                                                 !uiRecoveryClient.cancelled && !connectCancelled
                                             val revision = update.returnedScreenRevision
@@ -2787,6 +2858,7 @@ object SessionController {
                                             targetFps = fps,
                                             log = { line -> appendLog(line) },
                                             keepAliveWithStats = setup.keepAliveSendStatsAsBody,
+                                            firstPictureGrantSince = { uiRecoveryClient.firstPictureGrantSince },
                                             onEnded = ended@{
                                                 synchronized(wifiBindLock) {
                                                     if (connectCancelled || client.cancelled || !sessionAttempts.active(attempt) ||
@@ -2796,7 +2868,13 @@ object SessionController {
                                                     appContext?.let { io.github.shaonialife.cardeck.net.ProjectionAppMobileData.stop(it, VirtualLauncher.sessionGeneration()) }
                                                     attributeAudioTeardown()
                                                     if (isBmw) {
+                                                        val noPicture = sessionVideoSender?.framesSentTotal == 0L
                                                         endBmwStream(attempt, wifiEpoch, endpoint, receiverAtStart)
+                                                        if (noPicture) {
+                                                            val hint = "首页画面未送出，等待宝马重新邀请；可在车机的移动设备中重新选择本手机"
+                                                            phaseHint = hint
+                                                            uiHintSink?.invoke(hint)
+                                                        }
                                                         return@ended
                                                     }
                                                     BtSessionGate.sessionActive = false
@@ -2850,7 +2928,7 @@ object SessionController {
                                     val videoW = pendingVideoW
                                     val videoH = pendingVideoH
                                     val videoDensity = pendingVideoDensity
-                                    synchronized(wifiBindLock) {
+                                    val videoStarted = synchronized(wifiBindLock) {
                                         requireAttempt()
                                         sessionVideoSender?.start { surface ->
                                             requireAttempt()
@@ -2869,17 +2947,25 @@ object SessionController {
                                                     videoH,
                                                     videoDensity,
                                                 )
-                                            appendLog(
-                                                "MODE: 隐形屏 ${if (ok) "已启动（高德车机版优先）display=${source.displayId}" else "启动失败（Shizuku 就绪？）"}",
-                                            )
+                                            appendLog(if (ok) "MODE: 车机桌面已启动 display=${source.displayId}" else "MODE: 车机桌面创建失败")
                                             // 暗幕/常亮只在真正开始投屏后生效（见 ScreenDimmer.sessionActive）：
                                             // 应用启动时只挂触摸探针，避免「会话早断了、手机过一会儿还是变暗」。
                                             requireAttempt()
                                             if (ok) {
+                                                phaseHint = "车机桌面已就绪，正在送出首页画面…"
                                                 if (isBmw) CarShortcutLearning.onProjectionStarted(context, VirtualLauncher.sessionGeneration())
                                                 ScreenDimmer.setSessionActive(true)
                                             }
+                                            ok
                                         }
+                                    }
+                                    if (videoStarted != true) {
+                                        requireAttempt()
+                                        val hint = displayStartupHint(context)
+                                        phaseHint = hint
+                                        uiHintSink?.invoke(hint)
+                                        appendLog("MODE: 未启动桌面视频，结束本轮会话；$hint")
+                                        return@run
                                     }
                                 }
                                 // 音频通道内部统一 SETUP → RECORD → 捕获/同步，失败保留视频。

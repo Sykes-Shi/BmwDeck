@@ -37,7 +37,7 @@ internal class LocalLyricsImport(private val activity: AppCompatActivity, state:
         val now = MediaSessionsState.nowPlaying
         val track = now?.let { LyricTrack.of(it.pkg, it.title, it.artist, it.mediaId, it.album, it.durationMs) }
         if (!MediaSessionsState.accessGranted || track == null) {
-            showResult("请先播放要配歌词的歌曲，并确认 CarDeck 已取得通知使用权、可以显示歌名和歌手。")
+            showResult("请先播放要配歌词的歌曲，并确认 BmwDeck 已取得通知使用权、可以显示歌名和歌手。")
             return
         }
         AlertDialog.Builder(activity)

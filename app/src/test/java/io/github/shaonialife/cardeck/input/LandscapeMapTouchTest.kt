@@ -22,4 +22,11 @@ class LandscapeMapTouchTest {
         assertEquals(0 to 0, landscapeMapTouch(168, 0, 168, true, 1232, 688, 6f))
         assertEquals(1751 to 719, landscapeMapTouch(1919, 719, 168, true, 1232, 688, 0f))
     }
+    @Test fun rightRailAndContentReceiveTheirOwnUnmirroredCoordinates() {
+        // The existing injector expects dock coordinates first, followed by the application.
+        assertEquals(168, landscapeDockInputX(0, 168, 1752))
+        assertEquals(1919, landscapeDockInputX(1751, 168, 1752))
+        assertEquals(0, landscapeDockInputX(1752, 168, 1752))
+        assertEquals(167, landscapeDockInputX(1919, 168, 1752))
+    }
 }

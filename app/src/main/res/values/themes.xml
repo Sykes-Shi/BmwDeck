@@ -6,6 +6,16 @@
          假息屏遮罩是 APPLICATION_OVERLAY 窗口，只能覆盖内容区（系统栏由 SystemUI
          画在其上），所以系统栏颜色必须自身就是黑的才能与遮罩融为一体。 -->
     <style name="Theme.CarPlaySender" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="panelText">#FFF5F5F7</item>
+        <item name="panelMuted">#FF8E8E93</item>
+        <item name="panelLoading">#7C8B8B</item>
+        <item name="panelHint">#FF636366</item>
+        <item name="panelWarning">#FFE8C072</item>
+        <item name="panelError">#FFFF6B6B</item>
+        <item name="panelRow">#FF121215</item>
+        <item name="panelSegment">#FF1F1F23</item>
+        <item name="panelAccent">#FF0A84FF</item>
+        <item name="panelOutline">#FF48484A</item>
         <item name="deckSurface">@color/car_surface</item>
         <item name="deckControl">@color/car_control</item>
         <item name="deckOutline">@color/car_outline</item>
@@ -49,5 +59,32 @@
         <item name="android:activityOpenExitAnimation">@anim/stay</item>
         <item name="android:activityCloseEnterAnimation">@anim/stay</item>
         <item name="android:activityCloseExitAnimation">@anim/settings_out</item>
+    </style>
+    <!-- Initial phone window, including the system launch preview before PhoneWindowFrame attaches. -->
+    <style name="Theme.CarPlaySender.Phone" parent="Theme.CarPlaySender">
+        <item name="android:statusBarColor">@color/phone_canvas</item>
+        <item name="android:navigationBarColor">@color/phone_canvas</item>
+        <item name="android:windowBackground">@color/phone_canvas</item>
+        <item name="android:windowLightStatusBar">@bool/phone_light_system_background</item>
+        <item name="android:windowLightNavigationBar">@bool/phone_light_system_background</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+    <style name="Theme.CarPlaySender.PhoneHome" parent="Theme.CarPlaySender.Phone">
+        <item name="android:statusBarColor">@color/phone_masthead</item>
+        <item name="android:navigationBarColor">@color/phone_card</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+    <style name="Theme.CarPlaySender.PhoneSettings" parent="Theme.CarPlaySender.Phone">
+        <item name="panelText">@color/phone_ink</item>
+        <item name="panelMuted">@color/phone_muted</item>
+        <item name="panelLoading">@color/phone_muted</item>
+        <item name="panelHint">@color/phone_muted</item>
+        <item name="panelWarning">@color/phone_caution</item>
+        <item name="panelError">@color/phone_error</item>
+        <item name="panelRow">@color/phone_card</item>
+        <item name="panelSegment">@color/phone_tile</item>
+        <item name="panelAccent">@color/phone_selection</item>
+        <item name="panelOutline">@color/phone_muted</item>
+        <item name="colorControlActivated">@color/phone_accent</item>
     </style>
 </resources>

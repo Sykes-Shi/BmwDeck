@@ -72,6 +72,16 @@
             android:background="#34C759" />
     </FrameLayout>
 
+    <ImageView
+        android:id="@+id/dockVideoBack"
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:padding="6dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_chev_left"
+        android:contentDescription="优酷返回上一级"
+        android:visibility="gone" />
+
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -86,6 +96,16 @@
             android:orientation="vertical"
             android:gravity="center_horizontal" />
     </ScrollView>
+
+    <TextView
+        android:id="@+id/dockBaiduSuggestions"
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:gravity="center"
+        android:text="看联想"
+        android:textSize="10sp"
+        android:contentDescription="收起键盘，查看百度联想地址"
+        android:visibility="gone" />
 
     <ImageView
         android:id="@+id/dockControllerMap"

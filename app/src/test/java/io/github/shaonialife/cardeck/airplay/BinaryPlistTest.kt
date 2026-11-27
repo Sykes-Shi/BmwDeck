@@ -14,7 +14,7 @@ class BinaryPlistTest {
             "YnBsaXN0MDDXAQIDBAUGBwgJFxgZGhtcYXVkaW9MYXRlbmN5WGRpc3BsYXlzWGRldmljZUlEVW1vZGVsV3Jhd1Np" +
                 "emVYZmVhdHVyZXNUbmFtZRAAoQrWCwwNDg8QERITFBURWlVwc2lkZURvd25bUmVmcmVzaFJhdGVdV2lkdGhQaHlz" +
                 "aWNhbFRVVUlEXkhlaWdodFBoeXNpY2FsWFJvdGF0aW9uCCNATgAAAAAAABEDIF8QJGI3ZTZjNWEwLTExMTEtNDAw" +
-                "MC04MDAwLTAwMDAwMDAwMDAwMREB4AhfEBFGQToyMjo5MDoxMzozQjoxOFpEaVBsYXkyMCwxRgABAgMEBRJWYcyi" +
+                "MC04MDAwLTAwMDAwMDAwMDAwMREB4AhfEBEwMjowMDowMDowMDo1ODowM1pEaVBsYXkyMCwxRgABAgMEBRJWYcyi" +
                 "VkRpUGxheQAIABcAJAAtADYAPABEAE0AUgBUAFYAYwBuAHoAiACNAJwApQCmAK8AsgDZANwA3QDxAPwBAwEIAAAA" +
                 "AAAAAgEAAAAAAAAAHAAAAAAAAAAAAAAAAAAAAQ8=",
         )
@@ -23,7 +23,7 @@ class BinaryPlistTest {
     fun parsesTopLevelDictScalars() {
         val root = BinaryPlist.parse(vector) as Map<*, *>
         assertEquals("DiPlay", root["name"])
-        assertEquals("FA:22:90:13:3B:18", root["deviceID"])
+        assertEquals("02:00:00:00:58:03", root["deviceID"])
         assertEquals("DiPlay20,1", root["model"])
         assertEquals(1449249954L, root["features"])
         assertEquals(0L, root["audioLatency"])

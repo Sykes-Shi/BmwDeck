@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
 import io.github.shaonialife.cardeck.launcher.VirtualLauncher
+import io.github.shaonialife.cardeck.launcher.BaiduCruise
 import io.github.shaonialife.cardeck.util.DebugFileLog
 
 /**
@@ -34,6 +35,7 @@ class SenderApp : Application() {
                 addAction(Intent.ACTION_PACKAGE_ADDED)
                 addAction(Intent.ACTION_PACKAGE_REMOVED)
                 addAction(Intent.ACTION_PACKAGE_REPLACED)
+                addAction(Intent.ACTION_PACKAGE_CHANGED)
                 addDataScheme("package")
             }
         registerReceiver(
@@ -42,8 +44,11 @@ class SenderApp : Application() {
                     context: Context,
                     intent: Intent,
                 ) {
-                    VirtualLauncher
-                        .invalidateAppsCache()
+                    if (intent.getBooleanExtra(Intent.EXTRA_REPLACING, false) && intent.action == Intent.ACTION_PACKAGE_REMOVED) return
+                    VirtualLauncher.invalidateAppsCache()
+                    if (intent.data?.schemeSpecificPart == BaiduCruise.PACKAGE) {
+                        VirtualLauncher.refreshCarMapAvailability(context)
+                    }
                     Log.i(TAG, "应用清单缓存已失效（包变化）")
                 }
             },

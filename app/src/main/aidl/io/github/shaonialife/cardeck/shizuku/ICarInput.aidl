@@ -43,4 +43,7 @@ interface ICarInput {
     int createControllerDisplay(String name, int width, int height, int dpi, in Surface surface);
     // Read-only observation of the Android default network for an app on the projected display.
     String projectedUidRoute(int uid, long carHandle);
+    boolean pointerCancel(int displayId);
+    // Only a Baidu overlay on an owned map display. The caller must still own the return transition.
+    String dismissBaiduReturnOverlay(int displayId, io.github.shaonialife.cardeck.shizuku.IBaiduReturnGuard guard);
 }

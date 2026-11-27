@@ -7,9 +7,14 @@ import io.github.shaonialife.cardeck.launcher.LetterboxHintController
 import io.github.shaonialife.cardeck.launcher.VirtualLauncher
 import io.github.shaonialife.cardeck.launcher.resolveCardGesture
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
+import io.github.shaonialife.cardeck.render.AppRailFrame
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.VideoBarControls
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
+
+/** Map a right-hand rail into the existing dock-first input coordinate space, without mirroring either view. */
+internal fun landscapeDockInputX(x: Int, dockWidth: Int, appWidth: Int): Int =
+    if (x >= appWidth) x - appWidth else x + dockWidth
 
 /**
  * 触摸路由：把车机 hidSendReport 触点注入到车机侧虚拟屏（隐形屏模式）。
@@ -36,6 +41,14 @@ object TouchRouter {
 
     private var pressed = false
     private var pressedDisplay = -1
+    private var pressedRightRail = false
+    private var pressedRailFrame: AppRailFrame? = null
+    private var pressedRailToggle: AppRailFrame? = null
+    private var pressedPresentation = -1L
+    private var pressedSession = -1L
+    private var pressedMapFullscreen: Boolean? = null
+    private var discardUntilUp = false
+    private val contactOwner = TouchContactOwner()
     private var failStreak = 0
 
     /** 叠加卡片手势状态（卡片命中后独占触摸，不再注入应用）。 */
@@ -81,23 +94,58 @@ object TouchRouter {
 
     fun onContact(
         context: Context,
-        contact: Contact,
+        report: Contact,
     ) {
-        // 空闲槽占位（未按下且 0,0）忽略
-        if (!contact.down && contact.xPixels == 0 && contact.yPixels == 0) {
-            if (videoGesture.owns(contact.slot)) {
-                val hit = videoGesture.heldButton()?.let { VirtualLauncher.videoButtonAt((it.left + it.right) / 2, (it.top + it.bottom) / 2) }
-                videoGesture.handle(contact.slot, false, hit, pressed, VirtualLauncher::tapVideoButton)
+        val owner = contactOwner.slot
+        if (report.down && owner != null && report.slot != owner) {
+            if (pressedRailToggle != null) {
+                pressedRailToggle = null
+                discardUntilUp = true
             }
+            videoGesture.handle(report.slot, true, null, pressed, VirtualLauncher::tapVideoButton)
+            if (tapArmSlot >= 0 || tapConfirm != null) {
+                cancelMapTileTap()
+                tapDragSlot = owner
+            }
+        }
+        val contact = contactOwner.accept(report) ?: return
+        if (discardUntilUp) {
+            discardUntilUp = contact.down
             return
         }
         val px = (contact.xPixels * coordScaleX).toInt().coerceAtLeast(0)
         val py = (contact.yPixels * coordScaleY).toInt().coerceAtLeast(0)
-        val videoHit = VirtualLauncher.videoButtonAt(px.toFloat(), py.toFloat(),
+        val rightRail = VirtualLauncher.dockOnRight
+        val rail = VirtualLauncher.appRailFrame
+        if (pressed && (rightRail != pressedRightRail || pressedRailFrame != rail)) {
+            cancelPointer(contact.down)
+            return
+        }
+        val heldToggle = pressedRailToggle
+        if (heldToggle != null) {
+            val same = rail == heldToggle && VirtualLauncher.isAppRailCurrent(heldToggle) && heldToggle.containsToggle(px, py)
+            if (!same || !contact.down) {
+                pressedRailToggle = null
+                if (same) VirtualLauncher.toggleAppRail(heldToggle) else discardUntilUp = contact.down
+            }
+            return
+        }
+        if (contact.down && !pressed && !overlayPressed && !videoGesture.active && rail?.containsToggle(px, py) == true) {
+            if (VirtualLauncher.isAppRailCurrent(rail)) {
+                pressedRailToggle = rail
+                CarControllerRouter.onTouchDown(false)
+            } else discardUntilUp = true
+            return
+        }
+        val horizontalX = if (rightRail) {
+            landscapeDockInputX(px, VirtualLauncher.dockWidthPx, VirtualLauncher.appAreaWidth)
+        } else px
+        val railDock = rail?.containsDock(px, py) == true
+        val videoHit = if (railDock) null else VirtualLauncher.videoButtonAt(px.toFloat(), py.toFloat(),
             verifyDown = contact.down && !pressed && !overlayPressed && !videoGesture.active)
         if (videoGesture.handle(contact.slot, contact.down, videoHit, pressed || overlayPressed, VirtualLauncher::tapVideoButton)) return
         if (contact.down && !pressed) {
-            val inDock = if (VirtualLauncher.dockAtBottom) py >= VirtualLauncher.appHeightPx else px < VirtualLauncher.dockWidthPx
+            val inDock = if (rail != null) railDock else if (VirtualLauncher.dockAtBottom) py >= VirtualLauncher.appHeightPx else horizontalX < VirtualLauncher.dockWidthPx
             CarControllerRouter.onTouchDown(inDock)
         }
 
@@ -105,7 +153,7 @@ object TouchRouter {
         // 必须先于注入判定命中，否则触摸会穿透到下面的应用。
         run {
             val visible = LetterboxHintController.isVisible()
-            val hit = visible && LetterboxHintController.contains(px.toFloat(), py.toFloat())
+            val hit = visible && !railDock && LetterboxHintController.contains(px.toFloat(), py.toFloat())
             when (resolveCardGesture(visible, overlayPressed, contact.down, hit, appGestureActive = pressed)) {
                 CardGesture.NOT_HANDLED -> overlayPressed = false
                 CardGesture.CONSUME -> {
@@ -122,7 +170,10 @@ object TouchRouter {
 
         val launcher = VirtualLauncher
         val dockW = launcher.dockWidthPx
-        if (dockW <= 0 || launcher.appDisplayId < 0 || launcher.dockDisplayId < 0) return
+        if (dockW <= 0 || launcher.appDisplayId < 0 || launcher.dockDisplayId < 0) {
+            cancelPointer(contact.down)
+            return
+        }
         var svc = CarInputClient.service
         if (svc == null) {
             // 主动触发重绑（手机重启/Shizuku 重启后 binder 丢失）
@@ -130,6 +181,7 @@ object TouchRouter {
             svc = CarInputClient.service
         }
         if (svc == null) {
+            cancelPointer(contact.down)
             failStreak++
             diag(
                 "注入服务不可用（连续 $failStreak 次，自动重绑中；" +
@@ -155,7 +207,20 @@ object TouchRouter {
         val handlePin =
             splitHandlePressed ||
                 (contact.down && !pressed && launcher.dashHandleHit(px.toFloat(), py.toFloat()))
-        if (handlePin) {
+        if (rail != null) {
+            val display = if (rail.map) launcher.mapDisplayId else launcher.activeAppDisplayId()
+            if (display != rail.displayId || !launcher.isAppRailCurrent(rail) ||
+                rail.map != launcher.mapFullscreen || (rail.map && !launcher.canRouteMapTouch()) ||
+                (!railDock && !rail.containsContent(px, py))) {
+                cancelPointer(contact.down)
+                return
+            }
+            inDock = railDock
+            targetDisplay = if (inDock) launcher.dockDisplayId else display
+            localX = if (inDock) rail.dockX(px) else rail.inputX(px)
+            localY = if (inDock) rail.dockY(py) else rail.inputY(py)
+            routedToMap = rail.map && !inDock
+        } else if (handlePin) {
             splitHandlePressed = contact.down
             inDock = false
             targetDisplay =
@@ -176,7 +241,7 @@ object TouchRouter {
             if (!inDock &&
                 launcher.mapDisplayId >= 0 &&
                 launcher.canRouteMapTouch() &&
-                launcher.tileSlideFraction <= 0.01f &&
+                (launcher.mapFullscreen || launcher.tileSlideFraction <= 0.01f) &&
                 px < launcher.appAreaWidth &&
                 (
                     launcher.mapFullscreen ||
@@ -195,11 +260,11 @@ object TouchRouter {
                 localY = if (inDock) py - appH else py
             }
         } else {
-            inDock = px < dockW
+            inDock = horizontalX < dockW
             if (!inDock &&
                 launcher.mapDisplayId >= 0 &&
                 launcher.canRouteMapTouch() &&
-                launcher.tileSlideFraction <= 0.01f
+                (launcher.mapFullscreen || launcher.tileSlideFraction <= 0.01f)
             ) {
                 val point = landscapeMapTouch(px, py, dockW, launcher.mapFullscreen, launcher.mapTileWidth,
                     launcher.mapTileHeight, launcher.tileSlideFraction * launcher.appAreaWidth)
@@ -214,12 +279,20 @@ object TouchRouter {
             if (!routedToMap) {
                 targetDisplay = if (inDock) launcher.dockDisplayId else launcher.activeAppDisplayId()
                 val scale = if (inDock) 1f else launcher.activeAppScale().coerceAtLeast(1f)
-                localX = if (inDock) px else ((px - dockW) * scale).toInt()
+                localX = if (inDock) horizontalX else ((horizontalX - dockW) * scale).toInt()
                 localY = (py * scale).toInt()
             }
         }
         if (targetDisplay < 0) {
+            cancelPointer(contact.down)
             diag("目标屏无效 dock=${launcher.dockDisplayId} app=${launcher.appDisplayId}")
+            return
+        }
+        // Never complete a click against a different display or a layout shown after DOWN.
+        if (pressed && (pressedDisplay != targetDisplay || pressedSession != launcher.sessionGeneration() ||
+                pressedPresentation != launcher.presentationRevision() ||
+                (pressedMapFullscreen != null && pressedMapFullscreen != launcher.mapFullscreen))) {
+            cancelPointer(contact.down)
             return
         }
         // MOVE 节流：同屏的连续 move 间隔不足时合并丢弃（状态机不动，最新位置
@@ -249,40 +322,47 @@ object TouchRouter {
             return
         }
         try {
+            if (rail != null && !launcher.isAppRailCurrent(rail)) {
+                cancelPointer(contact.down)
+                return
+            }
             val ok: Boolean =
                 when {
                     contact.down && !pressed -> {
-                        pressed = true
+                        pressedRightRail = rightRail
+                        pressedRailFrame = rail
                         pressedDisplay = targetDisplay
-                        svc.pointerDown(targetDisplay, localX, localY)
-                    }
-
-                    contact.down && pressedDisplay != targetDisplay -> {
-                        // 跨屏拖动：先在旧屏收笔，再在新屏按下
-                        runCatching { svc.pointerUp(pressedDisplay, 0, 0) }
-                        pressedDisplay = targetDisplay
-                        svc.pointerDown(targetDisplay, localX, localY)
+                        pressedSession = launcher.sessionGeneration()
+                        pressedPresentation = launcher.presentationRevision()
+                        pressedMapFullscreen = if (routedToMap) launcher.mapFullscreen else null
+                        svc.pointerDown(targetDisplay, localX, localY).also {
+                            pressed = it
+                            discardUntilUp = !it
+                        }
                     }
 
                     contact.down -> svc.pointerMove(targetDisplay, localX, localY)
 
                     else -> {
-                        pressed = false
-                        svc.pointerUp(pressedDisplay, localX, localY)
+                        if (!pressed) return
+                        svc.pointerUp(pressedDisplay, localX, localY).also { if (it) pressed = false }
                     }
                 }
-            if (ok && routedToMap && !contact.down) launcher.observeDestinationKeyboard(targetDisplay)
-            if (ok) lastInjectAt = nowMs
             if (!ok) {
                 diag(
                     "注入被拒 disp=$targetDisplay ($localX,$localY) " +
                         "down=${contact.down} pressed=$pressed pressedDisplay=$pressedDisplay",
                 )
-            } else if (contact.down) {
-                diag("注入OK disp=$targetDisplay ($localX,$localY)")
+                cancelPointer(contact.down)
+                return
             }
+            if (routedToMap && !contact.down) launcher.observeDestinationKeyboard(targetDisplay)
+            lastInjectAt = nowMs
+            if (contact.down) diag("注入OK disp=$targetDisplay ($localX,$localY)")
         } catch (e: Exception) {
+            cancelPointer(contact.down)
             diag("注入异常：${e.message}")
+            return
         }
 
         // 仪表盘模式：地图 tile 的触摸同时喂给「点按 → 全屏地图」检测器
@@ -302,14 +382,23 @@ object TouchRouter {
         )
     }
 
-    fun reset() {
+    private fun cancelPointer(discard: Boolean) {
+        if (pressed) runCatching { CarInputClient.service?.pointerCancel(pressedDisplay) }
         pressed = false
+        pressedRailFrame = null
+        pressedRailToggle = null
+        splitHandlePressed = false
+        discardUntilUp = discard
+        tapDragSlot = -1
+        cancelMapTileTap()
+    }
+
+    fun reset() {
+        cancelPointer(false)
+        contactOwner.clear()
         pressedDisplay = -1
         videoGesture.reset()
         overlayPressed = false
-        splitHandlePressed = false
-        cancelMapTileTap()
-        tapDragSlot = -1
         coordScaleX = 1f
         coordScaleY = 1f
     }

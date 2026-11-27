@@ -1,24 +1,40 @@
 package io.github.shaonialife.cardeck.input
 
-/** Two distinct HID left edges enter the dock. A held stick produces only one edge. */
+/** Two separate presses towards the visible side of the dock select it. */
 internal class DockControllerNavigation {
     enum class Route { CONTENT, ENTER, PREVIOUS, NEXT, ACTIVATE, LEAVE, STAY }
 
     var active = false
         private set
-    private var firstLeft: Long? = null
+    var dockOnRight = false
+        set(value) {
+            if (value != field) reset()
+            field = value
+        }
+    val towardDock: CarControllerAction
+        get() = if (dockOnRight) CarControllerAction.RIGHT else CarControllerAction.LEFT
+    private data class Press(val action: CarControllerAction, val at: Long)
+    private var firstPress: Press? = null
+
+    fun entryDirection(collapsed: Boolean) = if (collapsed) CarControllerAction.LEFT else towardDock
 
     fun reset() {
-        firstLeft = null
+        firstPress = null
         active = false
     }
 
-    fun route(action: CarControllerAction, now: Long): Route {
+    fun route(action: CarControllerAction, now: Long, collapsed: Boolean = false): Route {
         if (!active) {
-            val last = firstLeft
-            firstLeft = now.takeIf { action == CarControllerAction.LEFT }
-            if (firstLeft == null || last == null || now - last !in 1..750L) return Route.CONTENT
-            firstLeft = null
+            val last = firstPress
+            if (action != entryDirection(collapsed)) {
+                firstPress = null
+                return Route.CONTENT
+            }
+            if (last == null || last.action != action || now - last.at !in 1..750L) {
+                firstPress = Press(action, now)
+                return Route.CONTENT
+            }
+            firstPress = null
             active = true
             return Route.ENTER
         }
@@ -26,8 +42,9 @@ internal class DockControllerNavigation {
             CarControllerAction.PREVIOUS, CarControllerAction.UP -> Route.PREVIOUS
             CarControllerAction.NEXT, CarControllerAction.DOWN -> Route.NEXT
             CarControllerAction.CONFIRM -> Route.ACTIVATE.also { reset() }
-            CarControllerAction.RIGHT, CarControllerAction.BACK -> Route.LEAVE.also { reset() }
-            CarControllerAction.LEFT -> Route.STAY
+            CarControllerAction.BACK -> Route.LEAVE.also { reset() }
+            CarControllerAction.LEFT, CarControllerAction.RIGHT ->
+                if (action == towardDock) Route.STAY else Route.LEAVE.also { reset() }
         }
     }
 

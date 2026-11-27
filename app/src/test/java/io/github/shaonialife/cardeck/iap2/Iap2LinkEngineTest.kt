@@ -145,7 +145,7 @@ class Iap2LinkEngineTest {
     /**
      * SYN-ACK 必须使用**新的**发送序号（对端按 `SYN.seq + 1` 校验）。
      *
-     * 2026-10-19 BMW 87866 实车日志：我方 SYN 与 SYN-ACK 同为 seq=99，车机判为重复帧
+     * 2026-10-19 某款宝马车机 实车日志：我方 SYN 与 SYN-ACK 同为 seq=99，车机判为重复帧
      * 丢弃，14 轮协商全部超时、133 条 SYN 未换回一条 ACK。catplay 用 `take_own_seq()`
      * 消耗新序号，这里锁死该行为。
      */

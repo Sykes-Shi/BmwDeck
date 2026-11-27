@@ -14,7 +14,6 @@ import io.github.shaonialife.cardeck.input.TouchRouter
 import io.github.shaonialife.cardeck.launcher.AppearanceMode
 import io.github.shaonialife.cardeck.launcher.CarAppearance
 import io.github.shaonialife.cardeck.launcher.AppIcons
-import io.github.shaonialife.cardeck.launcher.BaiduCruise
 import io.github.shaonialife.cardeck.launcher.DefaultMapPrefs
 import io.github.shaonialife.cardeck.launcher.DesktopApps
 import io.github.shaonialife.cardeck.launcher.DockPrefs
@@ -148,7 +147,7 @@ class SupersamplePanelFragment : SettingsPanelFragment() {
             segs.forEach { (view, segMode) ->
                 val active = segMode == mode
                 view.background = if (active) requireActivity().getDrawable(R.drawable.bg_segment_sel) else null
-                view.setTextColor(if (active) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt())
+                view.setTextColor(if (active) android.graphics.Color.WHITE else view.panelTextColor(R.attr.panelMuted))
             }
         }
     }
@@ -313,13 +312,14 @@ class OrientationPanelFragment : SettingsPanelFragment() {
             // 界面勾选状态即事实源：点击 = 取反当前显示状态（不重新读偏好，
             // 避免读值失真导致方向算反——实测「取消」会变成再次「启用」）
             packageType = OrientationPackage.inspect(requireContext(), pkg())
-            shown = packageType.mayRestart && AppOrientationCompat.isEnabled(requireContext(), pkg())
+            val canChange = packageType.mayRestart && !AppOrientationCompat.isProtectedPackage(pkg())
+            shown = canChange && AppOrientationCompat.isEnabled(requireContext(), pkg())
             refresh(shown)
 
             row.setOnClickListener {
                 // 面板顶部已探测到本机不支持（ROM 未注册 ChangeId）：直接忽略点击，
                 // 不再发起注定失败的 shell 往返，也不用 toast 反复打扰。
-                if (supported == false || !packageType.mayRestart) return@setOnClickListener
+                if (supported == false || !canChange) return@setOnClickListener
                 // **异步**：setEnabled 内部是 2 次 shell（各 4s 超时，最坏 8s），
                 // 直接同步调用会把点击回调所在的主线程卡到 ANR。
                 val target = !shown
@@ -345,8 +345,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                         }
 
                         AppOrientationCompat.WriteResult.DEFERRED -> {
-                            refresh(target)
-                            hostToast("已保存；关闭手机导航模式后，下次连接再应用横屏设置")
+                            bind(entry)
                         }
 
                         AppOrientationCompat.WriteResult.UNSUPPORTED -> {
@@ -391,15 +390,15 @@ class OrientationPanelFragment : SettingsPanelFragment() {
                     hint.text = if (packageType == OrientationPackage.VPN) {
                         "VPN 服务使用应用原有方向"
                     } else "应用信息不可用，暂缓调整方向"
-                    hint.setTextColor(0xFF8E8E93.toInt())
+                    hint.setTextColor(hint.panelTextColor(R.attr.panelMuted))
                     hint.visibility = View.VISIBLE
                     hint.setOnClickListener(null)
                     hint.isClickable = false
                 }
 
-                AppOrientationCompat.isProtectedPackage(requireContext(), pkg()) -> {
-                    hint.text = "地图横屏设置暂缓到下次连接，避免打断导航"
-                    hint.setTextColor(0xFF8E8E93.toInt())
+                AppOrientationCompat.isProtectedPackage(pkg()) -> {
+                    hint.text = "手机地图沿用手机的屏幕方向"
+                    hint.setTextColor(hint.panelTextColor(R.attr.panelMuted))
                     hint.visibility = View.VISIBLE
                     hint.setOnClickListener(null)
                     hint.isClickable = false
@@ -407,7 +406,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
 
                 onSystem && enabled -> {
                     hint.text = "已开启横屏（会话期间生效）"
-                    hint.setTextColor(0xFF8E8E93.toInt())
+                    hint.setTextColor(hint.panelTextColor(R.attr.panelMuted))
                     hint.visibility = View.VISIBLE
                     hint.setOnClickListener(null)
                     hint.isClickable = false
@@ -415,7 +414,7 @@ class OrientationPanelFragment : SettingsPanelFragment() {
 
                 onSystem -> {
                     hint.text = "系统残留：横屏仍在生效 · 点击清除"
-                    hint.setTextColor(0xFFFF6B6B.toInt())
+                    hint.setTextColor(hint.panelTextColor(R.attr.panelError))
                     hint.visibility = View.VISIBLE
                     hint.isClickable = true
                     // 只清系统侧覆盖、不动偏好（偏好本来就是关的）；弹窗提示会重启应用
@@ -550,15 +549,6 @@ class DockPanelFragment : SettingsPanelFragment() {
 }
 
 class DefaultMapPanelFragment : SettingsPanelFragment() {
-    private var refreshingPhoneNavigation = false
-    private val navigationListener: (Boolean) -> Unit = {
-        activity?.runOnUiThread { view?.let { current -> refreshPhoneNavigation(current) } }
-    }
-    private companion object {
-        // 手机与车机可以同时打开设置；跨面板只允许一个尚未完成的手动请求。
-        val cruiseStartPending = java.util.concurrent.atomic.AtomicBoolean(false)
-    }
-
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -566,128 +556,16 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
     ): View = inflater.inflate(R.layout.fragment_panel_map, container, false)
 
     override fun onViewCreated(view: View) {
-        VirtualLauncher.addDashboardListener(navigationListener)
-        setupBaiduCruise(view)
         setupMapScale(view)
-        setupPhoneNavigation(view)
-        val container = view.findViewById<LinearLayout>(R.id.mapOptions)
-        val installed =
-            VirtualLauncher.MAP_PACKAGES_PRIORITY.mapNotNull { pkg ->
-                val launch =
-                    requireContext().packageManager.getLaunchIntentForPackage(pkg)
-                        ?: return@mapNotNull null
-                val label =
-                    runCatching {
-                        requireContext()
-                            .packageManager
-                            .getApplicationInfo(pkg, 0)
-                            .loadLabel(requireContext().packageManager)
-                            .toString()
-                    }.getOrDefault(pkg)
-                pkg to label
-            }
-        if (installed.isEmpty()) {
-            container.addView(
-                TextView(requireContext()).apply {
-                    text = "未安装任何受支持的地图应用（高德/百度/腾讯）"
-                    setTextColor(0xFF8E8E93.toInt())
-                    textSize = 13f
-                },
-            )
-            return
-        }
-        var current =
-            DefaultMapPrefs.manualPackage(requireContext())
-                ?: installed.firstOrNull()?.first
-        installed.forEach { (pkg, label) ->
-            val row = layoutInflater.inflate(R.layout.item_map_option, container, false)
-            val iconPx = (34 * resources.displayMetrics.density).toInt()
-            val appIcon =
-                runCatching {
-                    requireContext().packageManager.getApplicationIcon(pkg)
-                }.getOrNull()
-            if (appIcon != null) {
-                row
-                    .findViewById<ImageView>(R.id.mapOptionIcon)
-                    .setImageBitmap(AppIcons.rounded(appIcon, iconPx))
-            }
-            row.findViewById<TextView>(R.id.mapOptionName).text = label
-            val radio = row.findViewById<ImageView>(R.id.mapOptionRadio)
-
-            fun refresh() {
-                radio.setImageResource(
-                    if (pkg == current) R.drawable.bg_radio_on else R.drawable.bg_radio_off,
-                )
-            }
-            refresh()
-            row.setOnClickListener {
-                current = pkg
-                DefaultMapPrefs.set(requireContext(), pkg)
-                for (i in 0 until container.childCount) {
-                    (container.getChildAt(i).tag as? (() -> Unit))?.invoke()
-                }
-                hostToast("默认地图：$label")
-            }
-            row.tag = { refresh() }
-            container.addView(row)
-        }
     }
 
     override fun onResume() {
         super.onResume()
-        view?.let { refreshPhoneNavigation(it) }
-    }
-
-    override fun onDestroyView() {
-        VirtualLauncher.removeDashboardListener(navigationListener)
-        super.onDestroyView()
-    }
-
-    private fun setupPhoneNavigation(view: View) {
-        val ctx = requireContext().applicationContext
-        view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.phoneNavigationMode)
-            .setOnCheckedChangeListener { _, enabled ->
-                if (refreshingPhoneNavigation) return@setOnCheckedChangeListener
-                if (VirtualLauncher.appContext() != null) {
-                    when (VirtualLauncher.setPhoneNavigationEnabled(enabled, VirtualLauncher.sessionGeneration())) {
-                        VirtualLauncher.NavigationSwitchResult.UPDATED -> hostToast(
-                            if (enabled) "已切换，请在手机打开地图；车机连接继续保持" else "已切回车机地图，回首页即可使用",
-                        )
-                        VirtualLauncher.NavigationSwitchResult.UNCHANGED -> Unit
-                        VirtualLauncher.NavigationSwitchResult.BUSY -> hostToast("地图或显示设置正在处理，请稍候再点一次")
-                        VirtualLauncher.NavigationSwitchResult.NOT_CONNECTED -> hostToast("连接状态已变化，请稍后重试")
-                    }
-                } else if (SessionController.isSessionRunning() || SessionController.sessionStarting.get()) {
-                    hostToast("正在连接，请等车机画面出现后切换")
-                } else if (AppOrientationCompat.isWorkPending()) {
-                    hostToast("正在恢复应用显示设置，请稍候再切换")
-                } else {
-                    PhoneNavigationPrefs.setEnabled(ctx, enabled)
-                    hostToast(if (enabled) "下次连接使用手机导航，车机地图暂停" else "下次连接恢复车机地图与自动暗幕偏好")
-                }
-                refreshPhoneNavigation(view)
-            }
-        refreshPhoneNavigation(view)
-    }
-
-    private fun refreshPhoneNavigation(view: View) {
-        if (!isAdded) return
-        val connected = VirtualLauncher.appContext() != null
-        val connecting = !connected && (SessionController.isSessionRunning() || SessionController.sessionStarting.get())
-        val selected = if (connected) VirtualLauncher.isPhoneNavigationActive() else PhoneNavigationPrefs.enabled(requireContext())
-        refreshingPhoneNavigation = true
-        view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.phoneNavigationMode).apply {
-            isChecked = selected
-            isEnabled = !connecting
-        }
-        refreshingPhoneNavigation = false
-        view.findViewById<TextView>(R.id.phoneNavigationNote).text =
-            (if (connected) "连接中可直接切换。" else if (connecting) "等待车机画面出现后可切换。" else "此选择会用于下次连接。") +
-                "开启后请在手机打开地图；车机地图与自动暗幕暂停，音乐或视频继续使用。关闭后回车机首页接回地图。" +
-                "切换不重启地图，正在导航的页面可能重新排版；横屏偏好下次连接再应用。"
-        val phoneNavigation = selected
-        view.findViewById<View>(R.id.baiduCruiseAutomatic).isEnabled = !phoneNavigation
-        view.findViewById<View>(R.id.baiduCruiseStart).isEnabled = !phoneNavigation && !cruiseStartPending.get()
+        val status = requireView().findViewById<TextView>(R.id.carMapStatus)
+        status.setText(
+            if (DefaultMapPrefs.resolve(requireContext()) != null) R.string.car_map_ready
+            else R.string.car_map_install,
+        )
     }
 
     private fun setupMapScale(view: View) {
@@ -717,58 +595,7 @@ class DefaultMapPanelFragment : SettingsPanelFragment() {
         }
     }
 
-    private fun setupBaiduCruise(view: View) {
-        val ctx = requireContext().applicationContext
-        val automatic = view.findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.baiduCruiseAutomatic)
-        automatic.isChecked = BaiduCruise.automaticEnabled(ctx)
-        automatic.setOnCheckedChangeListener { _, enabled ->
-            BaiduCruise.setAutomaticEnabled(ctx, enabled)
-        }
 
-        val start = view.findViewById<android.widget.Button>(R.id.baiduCruiseStart)
-        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-        start.setOnClickListener {
-            if (VirtualLauncher.isPhoneNavigationActive()) {
-                hostToast("当前使用手机导航，请在手机打开百度地图")
-                return@setOnClickListener
-            }
-            val requestedDisplay = VirtualLauncher.mapDisplayId
-            val requestedSession = VirtualLauncher.sessionGeneration()
-            val requestedNavigation = VirtualLauncher.navigationRevision()
-            if (requestedDisplay < 0) {
-                hostToast("请先连接车机，再开始百度巡航")
-                return@setOnClickListener
-            }
-            if (!cruiseStartPending.compareAndSet(false, true)) {
-                hostToast("正在打开百度巡航，请稍候")
-                return@setOnClickListener
-            }
-            start.isEnabled = false
-            start.text = "正在打开…"
-            Bg.run("baidu-cruise-manual") {
-                val ok =
-                    runCatching {
-                        // 排队期间已经断开或重连，旧点击不应作用到新会话的地图屏。
-                        VirtualLauncher.mapDisplayId == requestedDisplay &&
-                            VirtualLauncher.startBaiduCruise(expectedSession = requestedSession, expectedNavigation = requestedNavigation)
-                    }.getOrDefault(false)
-                cruiseStartPending.set(false)
-                mainHandler.post {
-                    if (!isAdded || this@DefaultMapPanelFragment.view !== view) return@post
-                    start.isEnabled = true
-                    start.text = "开始百度巡航"
-                    refreshPhoneNavigation(view)
-                    hostToast(
-                        if (ok) {
-                            "已请求打开百度巡航"
-                        } else {
-                            "无法打开，请确认已安装百度地图并保持车机连接"
-                        },
-                    )
-                }
-            }
-        }
-    }
 }
 
 /**
@@ -902,13 +729,13 @@ class DisplayPanelFragment : SettingsPanelFragment() {
                 if (active30) R.drawable.bg_segment_sel else R.drawable.bg_segment,
             )
             fps30.setTextColor(
-                if (active30) 0xFFFFFFFF.toInt() else 0xFF8E8E93.toInt(),
+                if (active30) android.graphics.Color.WHITE else fps30.panelTextColor(R.attr.panelMuted),
             )
             fps60.setBackgroundResource(
                 if (active30) R.drawable.bg_segment else R.drawable.bg_segment_sel,
             )
             fps60.setTextColor(
-                if (active30) 0xFF8E8E93.toInt() else 0xFFFFFFFF.toInt(),
+                if (active30) fps60.panelTextColor(R.attr.panelMuted) else android.graphics.Color.WHITE,
             )
         }
 

@@ -29,7 +29,10 @@ internal class RotaryBrightnessProbe(
         if (steps > 0) active.forward.addAndGet(steps) else active.backward.addAndGet(-steps)
     }
 
-    fun onFrame(width: Int, height: Int, dockWidth: Int, dockHeight: Int, bottom: Boolean, log: (String) -> Unit) {
+    fun onFrame(width: Int, height: Int, dockWidth: Int, dockHeight: Int, bottom: Boolean, log: (String) -> Unit) =
+        onFrame(width, height, dockWidth, dockHeight, bottom, false, log)
+
+    fun onFrame(width: Int, height: Int, dockWidth: Int, dockHeight: Int, bottom: Boolean, right: Boolean, log: (String) -> Unit) {
         val active = run.get() ?: return
         val elapsed = now() - active.start
         if (elapsed >= 12_000) {
@@ -62,7 +65,7 @@ internal class RotaryBrightnessProbe(
                 val g = row.get(offset + 1).toInt() and 255
                 val b = row.get(offset + 2).toInt() and 255
                 val luma = (54 * r + 183 * g + 19 * b) ushr 8
-                val inDock = if (bottom) index == 0 else x < split
+                val inDock = if (bottom) index == 0 else if (right) x >= width - split else x < split
                 if (inDock) {
                     dock += luma
                     dockCount++

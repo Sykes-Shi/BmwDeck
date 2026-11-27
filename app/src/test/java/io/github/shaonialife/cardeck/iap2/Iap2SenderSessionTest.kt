@@ -297,7 +297,7 @@ class Iap2SenderSessionTest {
             Iap2SenderSession(
                 phoneChannel,
                 log = { line -> println("PHONE $line") },
-                bluetoothMac = "34:86:DA:86:BB:96",
+                bluetoothMac = "02:00:00:00:58:02",
                 deviceName = "test-device",
             ).run(timeoutMillis = 10_000L)
 
@@ -337,7 +337,7 @@ class Iap2SenderSessionTest {
             Iap2SenderSession(
                 phoneChannel,
                 log = { line -> println("PHONE $line") },
-                bluetoothMac = "34:86:DA:86:BB:96",
+                bluetoothMac = "02:00:00:00:58:02",
                 deviceName = "test-device",
                 onEndpointUpdate = {
                     updates.set(it)
@@ -388,7 +388,7 @@ class Iap2SenderSessionTest {
             Iap2SenderSession(
                 phoneChannel,
                 log = { line -> println("PHONE $line") },
-                bluetoothMac = "34:86:DA:86:BB:96",
+                bluetoothMac = "02:00:00:00:58:02",
                 deviceName = "test-device",
             ).run(timeoutMillis = 10_000L)
 

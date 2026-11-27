@@ -37,8 +37,8 @@ object LetterboxHintController {
             AppOrientationCompat.isCurrentSession(owner.orientation) &&
             VirtualLauncher.isCurrentSession(owner.launcherGeneration)
 
-    private fun canOperate(owner: Owner, context: Context, pkg: String): Boolean =
-        isCurrent(owner) && !AppOrientationCompat.isProtectedPackage(context, pkg)
+    private fun canOperate(owner: Owner, pkg: String): Boolean =
+        isCurrent(owner) && !AppOrientationCompat.isProtectedPackage(pkg)
 
     /** 用户点过「关闭」/确认修不好：本次会话不再提示。 */
     private val dismissed = HashSet<String>()
@@ -199,7 +199,7 @@ object LetterboxHintController {
                     if (isVisible()) clear(owner)
                     return
                 }
-            if (!canOperate(owner, context, activity.packageName)) return
+            if (!canOperate(owner, activity.packageName)) return
             if (!OrientationPackage.inspect(context, activity.packageName).mayRestart) {
                 if (isVisible()) clear(owner)
                 return
@@ -222,19 +222,19 @@ object LetterboxHintController {
             // 主动把它拉回原屏——否则用户看到的是「点开应用又被打回桌面、毫无提示」
             // （2026-10-18 实测头条：只剩这条路径会静默失败）。
             val changeIds = AppOrientationCompat.changeIdsRegistered()
-            if (!canOperate(owner, context, activity.packageName)) return
+            if (!canOperate(owner, activity.packageName)) return
             var systemOn =
                 changeIds && AppOrientationCompat.isSystemEnabledFor(activity.packageName)
-            if (!canOperate(owner, context, activity.packageName)) return
+            if (!canOperate(owner, activity.packageName)) return
             var current = activity
             var healedAndRelaunched = false
             if (!systemOn && changeIds) {
                 val healed =
                     AppOrientationCompat.setEnabledForSession(context, activity.packageName, true, owner.orientation) ==
                         AppOrientationCompat.WriteResult.OK
-                if (!canOperate(owner, context, activity.packageName)) return
+                if (!canOperate(owner, activity.packageName)) return
                 systemOn = healed || AppOrientationCompat.isSystemEnabledFor(activity.packageName)
-                if (!canOperate(owner, context, activity.packageName)) return
+                if (!canOperate(owner, activity.packageName)) return
                 VirtualLauncher.logSink?.invoke(
                     "HINT: 「${activity.packageName}」系统侧横屏覆盖缺失——补写" +
                         "${if (healed) "成功" else "失败"}",
@@ -242,22 +242,22 @@ object LetterboxHintController {
                 if (systemOn) {
                     // 补写已杀掉进程：等它退出后在原屏重启（与按钮动作等价，但自动完成）
                     Thread.sleep(600)
-                    if (!canOperate(owner, context, activity.packageName)) return
+                    if (!canOperate(owner, activity.packageName)) return
                     val start =
                         Shell.exec(
                             "am start -n ${activity.component} --display $displayId -f 0x18000000",
                             timeoutMs = 8_000,
                         )
-                    if (!canOperate(owner, context, activity.packageName)) return
+                    if (!canOperate(owner, activity.packageName)) return
                     VirtualLauncher.logSink?.invoke(
                         "HINT: 补写后重启 「${activity.packageName}」ok=" +
                             (start.ok && start.output.contains("Starting:", ignoreCase = true)),
                     )
                     healedAndRelaunched = true
                     Thread.sleep(2_200)
-                    if (!canOperate(owner, context, activity.packageName)) return
+                    if (!canOperate(owner, activity.packageName)) return
                     val fresh = Shell.exec("dumpsys activity activities", timeoutMs = 4_000).output
-                    if (!canOperate(owner, context, activity.packageName)) return
+                    if (!canOperate(owner, activity.packageName)) return
                     current =
                         parseTopLetterboxActivity(displayId, fresh, fallbackW, fallbackH) ?: run {
                             if (isVisible()) clear(owner)
@@ -287,7 +287,7 @@ object LetterboxHintController {
             }
             // 黑边太窄（放不下卡片）时 showCard 返回 false 且不挂卡片；日志只记真实展示
             val wasVisible = isVisible()
-            if (!canOperate(owner, context, current.packageName)) return
+            if (!canOperate(owner, current.packageName)) return
             // 补写并重启后仍竖屏 → 说明这个应用压根不吃方向覆盖，直接给「仍然竖屏」
             // 终态卡（不再诱导用户再点一次必然失败的重启）
             val newState = if (healedAndRelaunched) State.FAILED else State.NORMAL
@@ -336,7 +336,7 @@ object LetterboxHintController {
         owner: Owner,
     ): Boolean {
         val context = VirtualLauncher.appContext() ?: return false
-        if (!canOperate(owner, context, activity.packageName)) return false
+        if (!canOperate(owner, activity.packageName)) return false
         val area = VirtualLauncher.appAreaRect() ?: return false
         val display =
             VirtualLauncher.hintDisplaySize(activity.displayId) ?: return false
@@ -362,7 +362,7 @@ object LetterboxHintController {
         val left = barStart + (barWidth - bitmap.width) / 2f
         val top = area.top + (area.height() - bitmap.height) / 2f
         synchronized(presentationLock) {
-            if (!canOperate(owner, context, activity.packageName)) return false
+            if (!canOperate(owner, activity.packageName)) return false
             state = newState
             target = Target(activity.packageName, activity.component, activity.displayId, owner)
             cardLeft = left
@@ -394,9 +394,9 @@ object LetterboxHintController {
      */
     private fun restart(t: Target) {
         val context = VirtualLauncher.appContext() ?: return
-        if (!canOperate(t.owner, context, t.packageName)) return
+        if (!canOperate(t.owner, t.packageName)) return
         synchronized(presentationLock) {
-            if (!canOperate(t.owner, context, t.packageName)) return
+            if (!canOperate(t.owner, t.packageName)) return
             state = State.BUSY
         }
         reRenderBusy(t, context)
@@ -404,7 +404,7 @@ object LetterboxHintController {
         AppOrientationCompat.enqueueSessionAction(t.owner.orientation) {
             runCatching {
                 AppOrientationCompat.awaitPending()
-                if (!canOperate(t.owner, context, t.packageName)) return@runCatching
+                if (!canOperate(t.owner, t.packageName)) return@runCatching
                 // am compat 的写入确实会杀进程，但任务按旧配置恢复；这里显式 stop 让
                 // 下次启动走全新路径（实测：重启后 overrideOrientation=NOSENSOR、
                 // areBoundsLetterboxed=false）。
@@ -412,16 +412,16 @@ object LetterboxHintController {
                     clear(t.owner)
                     return@runCatching
                 }
-                if (!canOperate(t.owner, context, t.packageName)) return@runCatching
+                if (!canOperate(t.owner, t.packageName)) return@runCatching
                 Shell.exec("am force-stop ${t.packageName}", timeoutMs = 8_000)
                 Thread.sleep(400)
-                if (!canOperate(t.owner, context, t.packageName)) return@runCatching
+                if (!canOperate(t.owner, t.packageName)) return@runCatching
                 val start =
                     Shell.exec(
                         "am start -n ${t.component} --display ${t.displayId} -f 0x18000000",
                         timeoutMs = 8_000,
                     )
-                if (!canOperate(t.owner, context, t.packageName)) return@runCatching
+                if (!canOperate(t.owner, t.packageName)) return@runCatching
                 if (!start.ok) {
                     VirtualLauncher.logSink?.invoke(
                         "HINT: 重启 ${t.packageName} 失败 exit=${start.exitCode} out=${start.output.take(120)}",
@@ -429,11 +429,11 @@ object LetterboxHintController {
                 }
                 // 等应用重建窗口后再复探
                 Thread.sleep(2_000)
-                if (!canOperate(t.owner, context, t.packageName)) return@runCatching
+                if (!canOperate(t.owner, t.packageName)) return@runCatching
                 val (w, h) = VirtualLauncher.hintDisplaySize(t.displayId) ?: return@runCatching
                 val ctx = VirtualLauncher.appContext() ?: return@runCatching
                 val dump = Shell.exec("dumpsys activity activities", timeoutMs = 4_000).output
-                if (!canOperate(t.owner, context, t.packageName)) return@runCatching
+                if (!canOperate(t.owner, t.packageName)) return@runCatching
                 val activity = parseTopLetterboxActivity(t.displayId, dump, w, h)
                 val still =
                     activity != null &&
@@ -474,7 +474,7 @@ object LetterboxHintController {
         val bitmap = LetterboxCardPainter.render(density, width, maxHeight, LetterboxCardState.BUSY) ?: return
         // 上下以原矩形中心对齐（高度可能变化）
         synchronized(presentationLock) {
-            if (!canOperate(t.owner, context, t.packageName)) return
+            if (!canOperate(t.owner, t.packageName)) return
             val centerY = (cardTop + cardBottom) / 2f
             cardTop = centerY - bitmap.height / 2f
             cardBottom = cardTop + bitmap.height

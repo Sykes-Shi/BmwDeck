@@ -10,6 +10,20 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class BmwRequestUiRecoveryPolicyTest {
+    @Test fun immediatelyReturningFromANewNativeTakeStillRespectsFlightAndWindowLimits() {
+        var now = 1_000L
+        val p = BmwRequestUiRecoveryPolicy("BMW Group MGU-50-P") { now }
+        assertTrue(p.decide("requestUI", true).allowed)
+        assertEquals("in_flight", p.decide("requestUI", true, nativeReturnRevision = 1L).reason)
+        p.finishRecovery()
+        for (revision in 1L..5L) {
+            now += 100
+            assertTrue(p.decide("requestUI", true, nativeReturnRevision = revision).allowed)
+            p.finishRecovery()
+            assertFalse(p.decide("requestUI", true, nativeReturnRevision = revision).allowed)
+        }
+        assertEquals("window_limit", p.decide("requestUI", true, nativeReturnRevision = 6L).reason)
+    }
     @Test
     fun completedAttemptNeedsAnotherRequestAndFiveSecondCooldown() {
         var now = 0L

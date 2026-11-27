@@ -32,6 +32,7 @@ internal object LauncherActivityTracker {
         activity: Activity,
         targetDisplayId: Int,
     ) {
+        if (activity !is DockActivity) VirtualLauncher.onDeckContentResumed(activity.display?.displayId ?: -1, activity.javaClass.name)
         log(activity, targetDisplayId, "resume")
     }
 

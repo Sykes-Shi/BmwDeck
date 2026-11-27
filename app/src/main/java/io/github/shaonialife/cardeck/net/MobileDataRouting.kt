@@ -108,7 +108,7 @@ object MobileDataRouting {
         val skippedMessage = if (change.skipped.isEmpty()) "" else " 跳过 ${change.skipped.size} 个未安装、受保护或共用 UID 的应用。"
         val identityMessage = if (change.reassigned.isEmpty()) "" else " ${change.reassigned.size} 个 UID 的所属应用已变，保留其系统设置。"
         val verification = if (seen == change.after) "Android 网络服务已确认名单。" else "已保存偏好，生效待验证。"
-        val scope = if (selected.isEmpty()) "已从设置中撤回 ${removed.size} 个由 CarDeck 新增的 UID。" else
+        val scope = if (selected.isEmpty()) "已从设置中撤回 ${removed.size} 个由 BmwDeck 新增的 UID。" else
             "本次选中 ${change.target.values.sumOf { it.size }} 个应用，新增 ${added.size} 个移动数据优先 UID，撤回 ${removed.size} 个。"
         return interrupted + scope + verification + skippedMessage + identityMessage
     }
@@ -254,7 +254,7 @@ object MobileDataRouting {
 
     private fun clearJournal(prefs: SharedPreferences, groups: Map<Int, Set<String>>) {
         check(prefs.edit().putStringSet(OWNED, encode(groups)).remove(PENDING).remove(ADD).remove(REMOVE).commit()) {
-            "恢复记录写入失败，请保留 CarDeck 并再次执行操作。"
+            "恢复记录写入失败，请保留 BmwDeck 并再次执行操作。"
         }
     }
 

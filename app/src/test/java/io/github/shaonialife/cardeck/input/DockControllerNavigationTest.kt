@@ -49,11 +49,54 @@ class DockControllerNavigationTest {
         assertFalse(nav.active)
     }
 
+    @Test fun rightDockUsesTwoRightEdgesAndLeavesTowardsTheApp() {
+        val nav = DockControllerNavigation().apply { dockOnRight = true }
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.LEFT, 10))
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.LEFT, 100))
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.RIGHT, 180))
+        assertEquals(Route.ENTER, nav.route(CarControllerAction.RIGHT, 300))
+        assertEquals(Route.STAY, nav.route(CarControllerAction.RIGHT, 350))
+        assertEquals(Route.NEXT, nav.route(CarControllerAction.DOWN, 400))
+        assertEquals(Route.LEAVE, nav.route(CarControllerAction.LEFT, 450))
+        assertFalse(nav.active)
+    }
+
+    @Test fun movingDockCancelsAnUnfinishedPairAndAnActiveSelection() {
+        val nav = DockControllerNavigation()
+        nav.route(CarControllerAction.LEFT, 20)
+        nav.dockOnRight = true
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.RIGHT, 100))
+        nav.dockOnRight = true
+        assertEquals(Route.ENTER, nav.route(CarControllerAction.RIGHT, 200))
+        nav.dockOnRight = false
+        assertFalse(nav.active)
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.CONFIRM, 250))
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.LEFT, 300))
+        assertEquals(Route.ENTER, nav.route(CarControllerAction.LEFT, 400))
+    }
+
     @Test fun dockSelectionTraversesAllIconsInEitherDirection() {
         val nav = DockControllerNavigation()
         assertEquals(0, nav.advance(3, 4, true, 1))
         assertEquals(3, nav.advance(0, 4, false, 1))
         assertEquals(2, nav.advance(0, 4, true, 2))
         assertEquals(0, nav.advance(0, 1, true, 8))
+    }
+
+    @Test fun collapsedHandleEntersFromLeftEvenWhenTheExpandedMusicDockIsOnTheRight() {
+        val nav = DockControllerNavigation().apply { dockOnRight = true }
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.RIGHT, 50, collapsed = true))
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.RIGHT, 100, collapsed = true))
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.LEFT, 160, collapsed = true))
+        assertEquals(Route.ENTER, nav.route(CarControllerAction.LEFT, 320, collapsed = true))
+        assertEquals(Route.NEXT, nav.route(CarControllerAction.NEXT, 400))
+        assertEquals(Route.LEAVE, nav.route(CarControllerAction.LEFT, 480))
+    }
+
+    @Test fun changingFromLeftHandleToRightRailCannotCompleteAnEarlierHalfPress() {
+        val nav = DockControllerNavigation().apply { dockOnRight = true }
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.LEFT, 50, collapsed = true))
+        assertEquals(Route.CONTENT, nav.route(CarControllerAction.RIGHT, 100))
+        assertEquals(Route.ENTER, nav.route(CarControllerAction.RIGHT, 150))
     }
 }

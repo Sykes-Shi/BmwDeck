@@ -50,6 +50,8 @@ class VideoSender(
      * RECORD 后 10.2s 整轮被 reset，视频/feedback/事件通道全都健康）。
      */
     private val keepAliveWithStats: Boolean = false,
+    /** Null until the BMW has acknowledged returning the screen and any native audio activity has ended. */
+    private val firstPictureGrantSince: () -> Long? = { null },
 ) {
     private val width: Int = (width / 2) * 2
     private val height: Int = (height / 2) * 2
@@ -57,6 +59,7 @@ class VideoSender(
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
     private val running = AtomicBoolean(false)
+    private val controlLost = AtomicBoolean(false)
     private var frameCounter = 0L
     private var configSent = false
 
@@ -91,6 +94,8 @@ class VideoSender(
 
     /** 已发送帧总数（英雄卡实时帧率 = 1s 轮询取差值）。 */
     val framesSentTotal: Long get() = framesSent
+
+    val hasSentPicture: Boolean get() = isRunning && framesSent > 0
 
     /** 仅时钟与数字字段；即使数据写入仍阻塞，控制连接收尾也可读取在途耗时。 */
     internal fun transportDiagnosticLine(): String {
@@ -147,10 +152,10 @@ class VideoSender(
     }
 
     /**
-     * 启动编码与推流。编码器输入 Surface 通过 [onSurfaceReady] 交给调用方渲染
+     * 启动编码与推流。只有 [attachSource] 确认桌面已挂载，才发布运行状态并启动发送线程。
      * （隐形屏模式下由 DualDisplayComposer 的合成画布填充）。
      */
-    fun start(onSurfaceReady: (Surface) -> Unit): Boolean {
+    fun start(attachSource: (Surface) -> Boolean): Boolean {
         if (running.get()) return true
         transportStopLogged.set(false)
         return try {
@@ -173,15 +178,22 @@ class VideoSender(
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                 }
             val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            encoder = codec
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             val surface = codec.createInputSurface()
-            codec.start()
-            encoder = codec
             inputSurface = surface
+            codec.start()
+            if (!attachSource(surface)) {
+                log("VIDEO: 桌面未就绪，关闭本轮编码器和视频端口")
+                stop()
+                return false
+            }
             running.set(true)
+            if (controlLost.get()) {
+                stop()
+                return false
+            }
             lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
-
-            onSurfaceReady(surface)
 
             Thread({ drainEncoder() }, "video-drain").apply {
                 isDaemon = true
@@ -198,6 +210,7 @@ class VideoSender(
     /** The session can no longer acknowledge frames; unblock a pending write and let the
      * video thread run its usual encoder cleanup and onEnded callback. */
     fun onControlConnectionLost() {
+        controlLost.set(true)
         running.set(false)
         runCatching { socket?.close() }
     }
@@ -224,6 +237,7 @@ class VideoSender(
      * （宝马 iD9 2026-10-20 实测：会话刚起时收到一次 forceKeyFrame）。
      */
     fun requestKeyFrame(): Boolean {
+        if (!isRunning) return false
         val codec = encoder ?: return false
         return try {
             val params = android.os.Bundle()
@@ -240,10 +254,15 @@ class VideoSender(
 
     private fun drainEncoder() {
         val codec = encoder ?: return
-        val output = socket?.getOutputStream() ?: return
         val bufferInfo = MediaCodec.BufferInfo()
         try {
+            val output = checkNotNull(socket?.getOutputStream()) { "视频数据端口已关闭" }
+            val startedAt = android.os.SystemClock.elapsedRealtime()
             while (running.get()) {
+                if (framesSent == 0L && firstPictureOverdue(startedAt, firstPictureGrantSince(), android.os.SystemClock.elapsedRealtime())) {
+                    log("VIDEO: 桌面和视频口已就绪、宝马连续允许显示 10 秒仍未送出首帧，结束空视频流")
+                    break
+                }
                 maybeLogTransportDiagnostics()
                 val index =
                     try {
@@ -507,6 +526,10 @@ class VideoSender(
     }
 
     companion object {
+        private const val FIRST_PICTURE_TIMEOUT_MS = 10_000L
+
+        internal fun firstPictureOverdue(startedAt: Long, grantSince: Long?, now: Long): Boolean =
+            grantSince != null && now - maxOf(startedAt, grantSince) >= FIRST_PICTURE_TIMEOUT_MS
         private const val HEADER_LEN = 128
         private const val OP_FRAME = 0
         private const val OP_CONFIG = 1

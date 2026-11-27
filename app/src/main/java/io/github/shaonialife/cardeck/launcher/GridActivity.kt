@@ -1,5 +1,7 @@
 package io.github.shaonialife.cardeck.launcher
 
+import io.github.shaonialife.cardeck.media.NetEaseCarEdition
+
 import androidx.core.view.descendants
 
 import android.content.Intent
@@ -31,7 +33,7 @@ import io.github.shaonialife.cardeck.util.Bg
  * 布局声明在 res/layout（activity_grid / item_grid_page / item_app_cell），
  * 代码只做动态格子尺寸计算与数据绑定。无字母导航（对照 CarPlay 主屏）。
  *
- * 默认只显示地图类应用（DesktopApps 默认选择），第一格固定「车机设置」入口；
+ * 默认显示百度地图汽车版，第一格固定「车机设置」入口；
  * 用户可在设置页勾选要显示的应用，返回桌面（onResume）即时刷新。
  */
 class GridActivity : CarAppearanceActivity() {
@@ -128,11 +130,13 @@ class GridActivity : CarAppearanceActivity() {
     private var networkMediaOwner: Pair<Long, String>? = null
     private var mediaCommandPending = false
     private var dashboardFeedbackUntil = 0L
-    private var destinationDialog: DashboardDestinationDialog? = null
 
     /** 仪表盘模式变化（VirtualLauncher 通知）。 */
     private val dashboardListener = { _: Boolean ->
-        runOnUiThread { applyDashboardMode(VirtualLauncher.dashboardMode) }
+        runOnUiThread {
+            if (appsCache != null && VirtualLauncher.peekCachedApps() == null) reload()
+            applyDashboardMode(VirtualLauncher.dashboardMode)
+        }
     }
 
     /** 媒体状态监听（MediaSessionsState 主线程回调）。 */
@@ -155,7 +159,6 @@ class GridActivity : CarAppearanceActivity() {
      *  具名字段（勿内联匿名 lambda）：onDestroy 才能对称移除，否则桌面重建累积泄漏。 */
     private val mapLayoutListener: (Boolean) -> Unit =
         { _ -> runOnUiThread {
-            destinationDialog?.updateBounds()
             refreshDashWallpaper()
         } }
 
@@ -274,8 +277,7 @@ class GridActivity : CarAppearanceActivity() {
             }
         }
         val hasArt = now?.art != null
-        dashboardBackdrop?.bind(now?.art, now?.backdropColor ?: ArtworkTone.DEFAULT, now?.daylightColor, carPalette)
-        panel.findViewById<View>(R.id.dashArtworkVeil).visibility = if (hasArt) View.VISIBLE else View.GONE
+        dashboardBackdrop?.bind(hasArt, now?.backdropColor ?: ArtworkTone.DEFAULT, now?.daylightColor, carPalette)
         panel.findViewById<View>(R.id.dashScrim).visibility = if (hasArt) View.GONE else View.VISIBLE
         val elapsed = android.os.SystemClock.elapsedRealtime()
         if (mediaVisible) {
@@ -309,9 +311,12 @@ class GridActivity : CarAppearanceActivity() {
                     now?.playing == true -> "正在播放"
                     else -> "进入车载播放"
                 }
-        panel.findViewById<ImageView>(R.id.dashPlayPause).setImageResource(
-            if (now?.playing == true) R.drawable.ic_media_pause else R.drawable.ic_media_play,
-        )
+        panel.findViewById<ImageView>(R.id.dashPlayPause).apply {
+            val playing = now?.playing == true
+            setImageResource(if (playing) R.drawable.ic_media_pause else R.drawable.ic_media_play)
+            val action = if (playing) "暂停" else "播放"
+            if (contentDescription != action) contentDescription = action
+        }
         panel.findViewById<TextView>(R.id.dashMediaTime)?.let { time ->
             if (now != null && now.durationMs > 0) {
                 time.visibility = View.VISIBLE
@@ -378,20 +383,21 @@ class GridActivity : CarAppearanceActivity() {
                 alpha = if (isEnabled) 1f else 0.3f
             }
         }
-        panel.findViewById<View>(R.id.dashBaiduCruise).visibility =
-            if (!VirtualLauncher.isPhoneNavigationActive() && VirtualLauncher.defaultMapComponent(this)?.packageName == "com.baidu.BaiduMap") View.VISIBLE else View.GONE
-        panel.findViewById<View>(R.id.dashBaiduDestination).visibility =
-            if (VirtualLauncher.isPhoneNavigationActive()) View.GONE else View.VISIBLE
         if (android.os.SystemClock.elapsedRealtime() >= dashboardFeedbackUntil) {
             panel.findViewById<View>(R.id.dashMediaFeedback).visibility = View.GONE
         }
     }
 
+    private fun refreshNavigationActions(panel: View) {
+        val installed = VirtualLauncher.defaultMapComponent(this) != null
+        panel.findViewById<View>(R.id.dashNavigationActions).visibility = if (installed) View.VISIBLE else View.GONE
+        (panel.parent as? View)?.findViewById<View>(R.id.dashMapUnavailable)?.visibility =
+            if (installed) View.GONE else View.VISIBLE
+    }
+
     /** 仪表盘模式 → pager 位置同步（0=仪表盘，1+=桌面；已在目标位则不动）。 */
     private fun applyDashboardMode(dashboard: Boolean) {
-        if (!dashboard || VirtualLauncher.isPhoneNavigationActive()) destinationDialog?.dismiss()
-        (dashboardView?.parent as? View)?.findViewById<View>(R.id.dashPhoneNavigationNotice)?.visibility =
-            if (VirtualLauncher.isPhoneNavigationActive()) View.VISIBLE else View.GONE
+        if (dashboard) dashboardView?.let(::refreshNavigationActions)
         if (mediaVisible) renderMediaCard()
         val pager = findViewById<ViewPager2>(R.id.gridPager)
         if (dashboard && pager.currentItem != 0) pager.setCurrentItem(0, false)
@@ -419,9 +425,16 @@ class GridActivity : CarAppearanceActivity() {
     private fun openCarPlayer(packageName: String?) {
         val ownerGrid = VirtualLauncher.gridDisplayId
         val ownerMap = VirtualLauncher.mapDisplayId
+        val generation = VirtualLauncher.sessionGeneration()
+        val navigation = VirtualLauncher.navigationRevision()
         Bg.run("dashboard-player") {
             if (!ownsGridAction(ownerGrid, ownerMap)) return@run
-            val ok = VirtualLauncher.launchCarMedia(packageName ?: CarMediaActivity.NETEASE_PACKAGE)
+            val target = packageName ?: NetEaseCarEdition.launcher(this@GridActivity)?.packageName ?: NetEaseCarEdition.MOBILE
+            val ok = if (target in io.github.shaonialife.cardeck.media.CarVideoSources.labels) {
+                packageManager.getLaunchIntentForPackage(target)?.component?.let { app ->
+                    ownsGridAction(ownerGrid, ownerMap) && VirtualLauncher.launchApp(app, generation, navigation)
+                } ?: false
+            } else VirtualLauncher.launchCarMedia(target, generation, navigation)
             if (!ok) runOnUiThread { if (ownsGridAction(ownerGrid, ownerMap)) showDashboardFeedback("打开失败，请稍后重试") }
         }
     }
@@ -430,35 +443,19 @@ class GridActivity : CarAppearanceActivity() {
         mediaVisible && !isFinishing && !isDestroyed && ownerGrid >= 0 &&
             VirtualLauncher.gridDisplayId == ownerGrid && VirtualLauncher.mapDisplayId == ownerMap
 
-    private fun chooseDestination(panel: View) {
-        val ownerGrid = VirtualLauncher.gridDisplayId
-        val ownerMap = VirtualLauncher.mapDisplayId
+    private fun openCommute(place: CommutePlace) {
+        val grid = VirtualLauncher.gridDisplayId
+        val map = VirtualLauncher.mapDisplayId
         val session = VirtualLauncher.sessionGeneration()
         val navigation = VirtualLauncher.navigationRevision()
-        val presentation = VirtualLauncher.presentationRevision()
-        fun live() = ownsGridAction(ownerGrid, ownerMap) && VirtualLauncher.isCurrentSession(session) &&
-            VirtualLauncher.navigationRevision() == navigation && !VirtualLauncher.isPhoneNavigationActive()
-        fun menuCurrent() = live() && VirtualLauncher.presentationRevision() == presentation &&
-            VirtualLauncher.dashboardMode && !VirtualLauncher.mapFullscreen && pager?.currentItem == 0
-        if (!menuCurrent() || ownerGrid <= 0 || ownerMap <= 0 || display?.displayId != ownerGrid) return
-        if (destinationDialog?.isShowing == true) return
-        val dialog = DashboardDestinationDialog(this, panel, ::menuCurrent) { destination ->
-            if (menuCurrent() && !VirtualLauncher.submitDashboardDestination(destination, ::live)) {
-                showDashboardFeedback("请在车机显示 CarDeck 首页时重试")
-            }
+        fun live() = ownsGridAction(grid, map) && VirtualLauncher.isCurrentSession(session) &&
+            VirtualLauncher.navigationRevision() == navigation
+        if (!live() || !VirtualLauncher.dashboardMode || display?.displayId != grid) return
+        if (VirtualLauncher.defaultMapComponent(this) == null) {
+            showDashboardFeedback("请在运行 BmwDeck 的手机上安装或启用百度地图汽车版")
+            return
         }
-        val anchor = panel.findViewById<View>(R.id.dashBaiduDestination)
-        dialog.setOnDismissListener {
-            if (destinationDialog === dialog) {
-                destinationDialog = null
-                controllerFocus.showAnchorHighlight(anchor, true)
-            }
-        }
-        if (dialog.updateBounds()) {
-            destinationDialog = dialog
-            dialog.show()
-            controllerFocus.showAnchorHighlight(anchor, false)
-        }
+        if (!VirtualLauncher.submitDashboardCommute(place, ::live)) showDashboardFeedback("请在车机显示 BmwDeck 首页时重试")
     }
 
     private fun showDashboardFeedback(message: String) {
@@ -622,7 +619,6 @@ class GridActivity : CarAppearanceActivity() {
     override fun onCarAppearanceChanged(day: Boolean) {
         refreshWallpaperIfChanged()
         refreshDashWallpaper()
-        destinationDialog?.applyPalette(carPalette)
         val root = findViewById<View>(R.id.gridPager) ?: return
         (root as ViewGroup).descendants.forEach { child ->
             if (child.id == R.id.cellLabel) carPalette.appCell(child.parent as View, child as TextView)
@@ -643,7 +639,6 @@ class GridActivity : CarAppearanceActivity() {
     }
 
     override fun onStop() {
-        destinationDialog?.dismiss()
         cursorRevision++
         controllerFocus.clear()
         mediaVisible = false
@@ -656,8 +651,10 @@ class GridActivity : CarAppearanceActivity() {
     override fun onResume() {
         super.onResume()
         LauncherActivityTracker.onResumed(this, VirtualLauncher.gridDisplayId)
+        VirtualLauncher.refreshCarMapAvailability(this)
         // 也覆盖从设置页返回：勾选变化即时反映
         reload()
+        dashboardView?.let(::refreshNavigationActions)
         refreshWallpaperIfChanged()
     }
 
@@ -698,19 +695,11 @@ class GridActivity : CarAppearanceActivity() {
 
     /** 重新读取应用清单与桌面选择（首帧与每次回到桌面时调用）。 */
     private fun reload() {
-        val apps =
-            appsCache ?: run {
-                val scanned = VirtualLauncher.launchableApps(this)
-                // iconCache 供 dock 运行中图标使用：整表换新——dock 在另一块屏的主线程
-                // 并发读，clear+逐条写入共享 HashMap 无同步会损坏（坏味道审查 P1）
-                VirtualLauncher.replaceIconCache(
-                    scanned.associate { it.component to it.icon },
-                )
-                appsCache = scanned
-                // 纳入进程级共享缓存：桌面扫过之后，车机设置首次打开即秒开
-                VirtualLauncher.adoptAppsCache(scanned)
-                scanned
-            }
+        val apps = VirtualLauncher.cachedApps(this)
+        if (appsCache !== apps) {
+            VirtualLauncher.replaceIconCache(apps.associate { it.component to it.icon })
+            appsCache = apps
+        }
 
         val selected = DesktopApps.selected(this, apps)
         val cells =
@@ -794,11 +783,10 @@ class GridActivity : CarAppearanceActivity() {
 
         fun bind() {
             dashboardView = panel
+            refreshNavigationActions(panel)
             carPalette.media(itemView)
-            itemView.findViewById<View>(R.id.dashPhoneNavigationNotice).visibility =
-                if (VirtualLauncher.isPhoneNavigationActive()) View.VISIBLE else View.GONE
             dashboardBackdrop?.clear()
-            dashboardBackdrop = MediaBackdrop(panel.findViewById(R.id.dashArtworkBackdrop), panel.findViewById(R.id.dashArtworkVeil))
+            dashboardBackdrop = MediaBackdrop(panel.findViewById(R.id.dashArtworkBackdrop))
             val scale = VirtualLauncher.gridScale()
             val cardMargin = (CARD_MARGIN_PX * scale).toInt()
             panel.layoutParams =
@@ -838,26 +826,8 @@ class GridActivity : CarAppearanceActivity() {
                 sendMediaCommand(TargetedMediaControls.Command.PLAY_PAUSE)
             }
             panel.findViewById<View>(R.id.dashOpenPlayer).setOnClickListener { openCarPlayer(dashboardMediaSnapshot?.pkg) }
-            panel.findViewById<View>(R.id.dashBaiduDestination).setOnClickListener {
-                chooseDestination(panel)
-            }
-            panel.findViewById<View>(R.id.dashBaiduCruise).setOnClickListener {
-                val ownerGrid = VirtualLauncher.gridDisplayId
-                val ownerMap = VirtualLauncher.mapDisplayId
-                val ownerSession = VirtualLauncher.sessionGeneration()
-                val ownerNavigation = VirtualLauncher.navigationRevision()
-                Bg.run("dashboard-baidu-cruise") {
-                    if (!ownsGridAction(ownerGrid, ownerMap)) return@run
-                    val ok = VirtualLauncher.startBaiduCruise(expectedSession = ownerSession, expectedNavigation = ownerNavigation)
-                    runOnUiThread {
-                        if (VirtualLauncher.isCurrentSession(ownerSession) && ownsGridAction(ownerGrid, ownerMap)) {
-                            showDashboardFeedback(if (ok) "已发送巡航请求，请在地图中确认" else "未能打开巡航，可进入地图手动操作")
-                        }
-                    }
-                }
-            }
-            // 全屏地图的退出走 dock 的 home 按钮（showDashboard 路由闸门会自动
-            // setMapFullscreen(false)），仪表盘卡上不再放「全屏地图」按钮
+            panel.findViewById<View>(R.id.dashGoHome).setOnClickListener { openCommute(CommutePlace.HOME) }
+            panel.findViewById<View>(R.id.dashGoWork).setOnClickListener { openCommute(CommutePlace.WORK) }
             bindSplitHandle(scale)
             applyDashCardChrome()
             renderMediaCard()
@@ -914,7 +884,7 @@ class GridActivity : CarAppearanceActivity() {
                     lp.leftMargin = (center + halfGap).toInt()
                 }
             }
-            itemView.findViewById<View>(R.id.dashPhoneNavigationNotice).apply {
+            itemView.findViewById<View>(R.id.dashMapUnavailable).apply {
                 val margin = (CARD_MARGIN_PX * scale).toInt()
                 layoutParams = android.widget.FrameLayout.LayoutParams(
                     if (portrait) ViewGroup.LayoutParams.MATCH_PARENT else (center - halfGap - margin).toInt().coerceAtLeast(1),
@@ -968,13 +938,9 @@ class GridActivity : CarAppearanceActivity() {
                         view.setOnClickListener {
                             // 不用系统 Toast：虚拟屏上显示位置不可控（SettingsToastHost 的由来）；
                             // 应用拉起本身就是反馈
-                            if (cell.entry.component.packageName == CarMediaActivity.NETEASE_PACKAGE) {
-                                openCarPlayer(CarMediaActivity.NETEASE_PACKAGE)
-                            } else {
-                                val ownerSession = VirtualLauncher.sessionGeneration()
-                                val ownerNavigation = VirtualLauncher.navigationRevision()
-                                Bg.run("launch-app") { VirtualLauncher.launchApp(cell.entry.component, expectedSession = ownerSession, expectedNavigation = ownerNavigation) }
-                            }
+                            val ownerSession = VirtualLauncher.sessionGeneration()
+                            val ownerNavigation = VirtualLauncher.navigationRevision()
+                            Bg.run("launch-app") { VirtualLauncher.launchApp(cell.entry.component, expectedSession = ownerSession, expectedNavigation = ownerNavigation) }
                         }
                     }
                 }

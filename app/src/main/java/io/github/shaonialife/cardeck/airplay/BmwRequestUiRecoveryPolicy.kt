@@ -28,11 +28,12 @@ internal class BmwRequestUiRecoveryPolicy(
 
     private val attemptTimes = ArrayDeque<Long>()
     private var inFlight = false
+    private var lastImmediateReturn: Long? = null
     private var lastObservedMillis: Long? = null
 
     /** 调用方仍须在执行副作用前确认 client 未被取消或替换；失败也消耗额度及冷却期。 */
     @Synchronized
-    fun decide(commandType: String?, liveSession: Boolean): Decision {
+    fun decide(commandType: String?, liveSession: Boolean, awaitingExplicitReturn: Boolean = false, nativeReturnRevision: Long? = null): Decision {
         val now = monotonicMillis()
         val previous = lastObservedMillis
         val clockRolledBack = previous != null && now < previous
@@ -50,6 +51,7 @@ internal class BmwRequestUiRecoveryPolicy(
             !liveSession -> return denied("session_not_live")
             commandType != "requestUI" -> return denied("unsupported_command")
             clockRolledBack -> return denied("clock_rollback")
+            awaitingExplicitReturn -> return denied("awaiting_explicit_screen_return")
             inFlight -> return denied("in_flight")
         }
         val cooldownRemaining = attemptTimes.peekLast()
@@ -61,7 +63,12 @@ internal class BmwRequestUiRecoveryPolicy(
         }
         // 同时受窗口与冷却约束时，报告真正可重试的时间；拒绝请求不移动尝试时间。
         if (windowRemaining > 0L) return denied("window_limit", maxOf(windowRemaining, cooldownRemaining))
-        if (cooldownRemaining > 0L) return denied("cooldown", cooldownRemaining)
+        // A new native Take can follow a successful redraw by a few hundred ms. Its
+        // first explicit return is a different ownership transition, not a duplicate.
+        if (cooldownRemaining > 0L && (nativeReturnRevision == null || nativeReturnRevision == lastImmediateReturn)) {
+            return denied("cooldown", cooldownRemaining)
+        }
+        if (nativeReturnRevision != null) lastImmediateReturn = nativeReturnRevision
         attemptTimes.addLast(now)
         inFlight = true
         return Decision(true, "allowed", 0L, attemptTimes.size)

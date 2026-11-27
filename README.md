@@ -6,12 +6,9 @@ BmwDeck is an experimental Android project based on [CarDeck](https://github.com
 
 ## 新手入口
 
-- [V55 手机界面与系统状态栏更新说明](https://github.com/Sykes-Shi/BmwDeck/releases/tag/v55-update-notes) · 本次仅发布文字说明。
-
-- [安装与首次连接教程](docs/QUICKSTART.md)：安装到安卓手机 → 启动 Shizuku → 配对宝马 → 启动连接。
-- [版本更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Sykes-Shi/BmwDeck/issues)
-- [下载此前发布的 V47 中控公开试用版 APK](https://github.com/Sykes-Shi/BmwDeck/releases/download/v47-public-preview/CarDeck-BMW-v47-public.apk) · [发布说明与校验值](https://github.com/Sykes-Shi/BmwDeck/releases/tag/v47-public-preview)
-- 已安装 GitHub V46 公开版的用户，可直接安装 V47 保留设置。原来使用内部中控试用包的用户，请使用同渠道的 V47 覆盖升级。两个渠道的签名不同，跨渠道更换涉及卸载和清除应用数据。
+- [V58 中控版源码](https://github.com/Sykes-Shi/BmwDeck/tree/v58-source) · [V58 发布说明](https://github.com/Sykes-Shi/BmwDeck/releases/tag/v58-source) · [V47 至 V58 更新记录](CHANGELOG.md)
+- 初次体验可按下方「从源码构建」生成手机端应用。已安装中控版的用户可直接看[首次连接教程](docs/QUICKSTART.md)。
+- GitHub 现提供源码和版本说明。V46、V47 的历史安装包已撤下，仍可查阅 [V47 版本说明](https://github.com/Sykes-Shi/BmwDeck/releases/tag/v47-public-preview)和 [V55 手机界面更新说明](https://github.com/Sykes-Shi/BmwDeck/releases/tag/v55-update-notes)。
 
 ## 车机兼容性：社区试用反馈（2026 年 11 月）
 
@@ -22,16 +19,16 @@ BmwDeck is an experimental Android project based on [CarDeck](https://github.com
 
 ## 项目状态
 
-当前仓库源码对应 **V47 中控公开试用版**，在 V39 中控版本基础上继续优化，仍在开发和实车验证中。宝马车型、车机版本和手机系统存在差异，连接、声音、网络、导航和按键功能的表现可能不同。请在停车时完成配置和操作，并保留原车导航等备用方式。完整说明见 [免责声明](DISCLAIMER.md)。
+当前仓库源码对应 **V58 中控试用版**（`0.1.13-v58-center`，versionCode 178）。宝马车型、车机版本和手机系统存在差异，连接、声音、网络、导航和按键功能的表现可能不同。请在停车时完成配置和操作，并保留原车导航等备用方式。完整说明见[免责声明](DISCLAIMER.md)。
 
 仪表导航测试版作为独立版本开发，使用不同的应用 ID；其源码见 [cluster-test 分支](https://github.com/Sykes-Shi/BmwDeck/tree/cluster-test)，相关功能仍在实验与验证中。两版应分别安装授权，使用时一次只运行并连接其中一版。
 
-各诊断版本的主要变化见 [版本更新记录](CHANGELOG.md)。新手先安装上面的中控公开试用版；反馈问题请使用 [GitHub Issues](https://github.com/Sykes-Shi/BmwDeck/issues)。正式签名只标识本项目的发布来源，不代表宝马/Apple 认证或生产级稳定性。
+各版本的主要变化见[版本更新记录](CHANGELOG.md)。反馈问题时请注明手机型号、车机系统和 BmwDeck 版本。[GitHub Issues](https://github.com/Sykes-Shi/BmwDeck/issues)
 
 ## 主要功能与优化
 
 - 针对宝马车机的无线连接、会话和音频兼容性进行调整。
-- 优化横屏桌面、地图和媒体界面的显示；支持车机地图与手机导航切换，并提供百度地图巡航入口。
+- V58 的中控导航固定使用运行 BmwDeck 的 Android 手机上的百度地图汽车版。首页地图、「回家」「去公司」和已映射的 MAP / NAV 按键都打开汽车版。手机上的百度地图手机版可独立导航。
 - 增加旋钮、方向盘及车机快捷键相关的输入处理、诊断和校准功能；具体可用按键取决于车机上报的信号。
 - 支持媒体信息及歌词显示，可选择使用在线歌词查询。
 - 提供网络连接、声音和输入等诊断信息，便于排查兼容问题。
@@ -39,7 +36,7 @@ BmwDeck is an experimental Android project based on [CarDeck](https://github.com
 ## 使用条件
 
 - 推荐 Android 14 或更新版本的手机。项目的最低构建版本为 Android 12（API 31），部分功能依赖较新系统。
-- 安装并启动 [Shizuku](https://shizuku.rikka.app/)，按其说明授权 CarDeck-BMW；虚拟显示、输入注入等功能依赖 Shizuku。
+- 安装并启动 Shizuku，按应用提示授权 BmwDeck。虚拟显示和触控依赖该服务。[Shizuku 启动指南](https://shizuku.rikka.app/)
 - 支持无线 CarPlay 的宝马 iDrive 7 车机；实际可用性取决于手机、车机和系统配置。
 
 在线歌词是可选功能。开启后，在需要查询时会向 LRCLIB、网易云音乐公开曲库发送歌名和歌手；专辑与时长用于本地匹配。网络重试选项可在应用中设置。
@@ -56,9 +53,9 @@ BmwDeck is an experimental Android project based on [CarDeck](https://github.com
 gradlew.bat :app:assembleDebug
 ```
 
-构建完成后，debug APK 位于 `app/build/outputs/apk/debug/`。开发构建的应用 ID 为 `io.github.shaonialife.cardeck.bmwprobe.dev`，与公开试用版和上游版分开。
+构建完成后，可将本机生成的 `app/build/outputs/apk/debug/app-debug.apk` 安装到 Android 手机。开发构建的版本名为 `0.1.13-v58-center-dev`，应用 ID 为 `io.github.shaonialife.cardeck.bmwprobe.dev`，可与原中控试用版并存。首次使用需单独授予 Shizuku 权限，一次只连接其中一个应用。
 
-公开试用版使用 `release` 构建，应用 ID 为 `io.github.shaonialife.cardeck.bmwprobe`，版本为 `0.1.13-v47-public`（versionCode 165）。构建时通过环境变量 `CARDECK_RELEASE_STORE`、`CARDECK_RELEASE_PASSWORD` 提供仓库外的 PKCS12 签名文件与口令，alias 为 `cardeck-bmw`。未提供签名时产物为 unsigned，不允许直接公开发布。密钥、加密口令及解密后的口令均不得提交到仓库。公开证书指纹与 APK SHA-256 见发布说明。
+`release` 构建的应用 ID 为 `io.github.shaonialife.cardeck.bmwprobe`，版本为 `0.1.13-v58-center`（versionCode 178）。Gradle 通过环境变量 `CARDECK_RELEASE_STORE`、`CARDECK_RELEASE_PASSWORD` 读取仓库外的 PKCS12 签名文件与口令，alias 为 `cardeck-bmw`。省略这些配置会生成未签名产物。要覆盖手机上已有的同包名应用，签名须与原安装一致。
 
 ## 致谢与许可
 

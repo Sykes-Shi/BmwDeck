@@ -39,10 +39,10 @@ class WifiSavedNetworksTest {
 
     @Test
     fun removingSavedCarWifiDoesNotMatchAnotherSsidWithDifferentSpacing() {
-        val listing = "Network Id  SSID  Security type\n7    BMW   12345    wpa2-psk\n8    BMW 12345    wpa2-psk"
-        assertEquals(listOf(7), WifiSavedNetworks.idsOf(listing, "BMW   12345"))
-        assertEquals(listOf(8), WifiSavedNetworks.idsOf(listing, "BMW 12345"))
-        assertEquals(emptyList<Int>(), WifiSavedNetworks.idsOf(listing, "BMW  12345"))
+        val listing = "Network Id  SSID  Security type\n7    BMW   DEMO    wpa2-psk\n8    BMW DEMO    wpa2-psk"
+        assertEquals(listOf(7), WifiSavedNetworks.idsOf(listing, "BMW   DEMO"))
+        assertEquals(listOf(8), WifiSavedNetworks.idsOf(listing, "BMW DEMO"))
+        assertEquals(emptyList<Int>(), WifiSavedNetworks.idsOf(listing, "BMW  DEMO"))
     }
 
     @Test

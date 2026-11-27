@@ -183,7 +183,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginLeft="9dp"
-                android:text="默认地图"
+                android:text="中控地图"
                 android:textColor="@color/car_text_muted"
                 android:textSize="14sp" />
         </LinearLayout>

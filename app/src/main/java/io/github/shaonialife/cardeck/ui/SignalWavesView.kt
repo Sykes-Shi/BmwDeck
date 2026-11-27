@@ -118,7 +118,7 @@ class SignalWavesView
 
             val baseColor =
                 when (state) {
-                    State.IDLE -> currentColor(R.color.m3_wave_idle)
+                    State.IDLE -> currentColor(R.color.phone_hero_signal)
                     State.CONNECTING -> currentColor(R.color.m3_wave_connecting)
                     State.CONNECTED -> currentColor(R.color.m3_wave_connected)
                 }

@@ -80,7 +80,7 @@ class ConnectedWifiSelectionTest {
 
     @Test
     fun ssidMatchingDoesNotUsePrefixOrTrim() {
-        assertNull(ConnectedWifiSelection.select("BMW", "BMW", listOf(candidate(1, "BMW 12345"))))
+        assertNull(ConnectedWifiSelection.select("BMW", "BMW", listOf(candidate(1, "BMW DEMO"))))
         assertNull(ConnectedWifiSelection.select("BMW", "BMW", listOf(candidate(1, " BMW"))))
     }
 

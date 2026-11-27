@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <attr name="panelText" format="color" />
+    <attr name="panelMuted" format="color" />
+    <attr name="panelLoading" format="color" />
+    <attr name="panelHint" format="color" />
+    <attr name="panelWarning" format="color" />
+    <attr name="panelError" format="color" />
+    <attr name="panelRow" format="color" />
+    <attr name="panelSegment" format="color" />
+    <attr name="panelAccent" format="color" />
+    <attr name="panelOutline" format="color" />
+</resources>

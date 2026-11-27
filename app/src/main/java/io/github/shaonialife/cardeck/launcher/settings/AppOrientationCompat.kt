@@ -36,9 +36,8 @@ object AppOrientationCompat {
     private const val PREFS = "app_orientation"
     private const val PENDING_PREFS = "app_orientation_pending"
     private const val PENDING_PACKAGES = "attempted_packages"
-    private val sessionPolicy = OrientationSessionPolicy(PhoneNavigationPrefs::isMapPackage)
+    private val sessionPolicy = OrientationSessionPolicy()
     private val pendingWork = AtomicInteger()
-    private val workGate = Any()
     private val pendingPrefsLock = Any()
 
     @Volatile
@@ -53,17 +52,8 @@ object AppOrientationCompat {
             }
         }
 
-    /** 新连接在排队写入前建立保护策略，也解除上一轮实时切换留下的地图冻结。 */
-    fun beginSession(phoneNavigation: Boolean) {
-        sessionPolicy.begin(phoneNavigation)
-    }
-
-    /**
-     * 实时切换只更新内存策略；不会写覆盖、重启地图或结束当前显示会话。
-     * 与任务登记共用短锁，已在执行的命令结束前拒绝切换；调用者稍后重试即可。
-     */
-    fun updatePhoneNavigation(enabled: Boolean): Boolean = synchronized(workGate) {
-        if (pendingWork.get() > 0) false else sessionPolicy.updatePhoneNavigation(enabled) != null
+    fun beginSession() {
+        sessionPolicy.begin()
     }
 
     /** 只失效旧任务；实际复原仍由 resetAllAsync 排队，不阻塞拆屏。 */
@@ -74,15 +64,15 @@ object AppOrientationCompat {
     fun isWorkPending(): Boolean = pendingWork.get() > 0
 
     private fun registerWork() {
-        synchronized(workGate) { pendingWork.incrementAndGet() }
+        pendingWork.incrementAndGet()
     }
 
     internal fun sessionToken(): OrientationSessionPolicy.Token? = sessionPolicy.sessionToken()
 
     internal fun isCurrentSession(token: OrientationSessionPolicy.Token): Boolean = sessionPolicy.isActive(token)
 
-    internal fun isProtectedPackage(context: Context, pkg: String): Boolean =
-        sessionPolicy.isProtected(pkg, PhoneNavigationPrefs.enabled(context))
+    internal fun isProtectedPackage(pkg: String): Boolean =
+        sessionPolicy.isProtected(pkg)
 
     internal fun setEnabledForSession(
         context: Context,
@@ -90,7 +80,7 @@ object AppOrientationCompat {
         enable: Boolean,
         token: OrientationSessionPolicy.Token,
     ): WriteResult =
-        if (sessionPolicy.isActive(token) && !isProtectedPackage(context, pkg)) {
+        if (sessionPolicy.isActive(token) && !isProtectedPackage(pkg)) {
             setEnabledForToken(context.applicationContext, pkg, enable, token)
         } else WriteResult.FAILED
 
@@ -117,8 +107,8 @@ object AppOrientationCompat {
         }
     }
 
-    private fun allowsWrite(token: OrientationSessionPolicy.Token, context: Context?, pkg: String): Boolean =
-        sessionPolicy.permits(token, pkg, context?.let(PhoneNavigationPrefs::enabled) ?: false)
+    private fun allowsWrite(token: OrientationSessionPolicy.Token, pkg: String): Boolean =
+        sessionPolicy.permits(token, pkg)
 
     /** 先持久登记再下发命令，进程中途退出也保留精确的待复原名单。 */
     private fun rememberAttempt(context: Context, pkg: String): Boolean = synchronized(pendingPrefsLock) {
@@ -237,7 +227,7 @@ object AppOrientationCompat {
     ): WriteResult {
         if (!sessionPolicy.isCurrent(token)) return WriteResult.FAILED
         if (!OrientationPackage.inspect(context, pkg).mayRestart) return WriteResult.PROTECTED
-        if (isProtectedPackage(context, pkg)) {
+        if (isProtectedPackage(pkg)) {
             prefs(context).edit().putBoolean(key(pkg), enable).apply()
             return WriteResult.DEFERRED
         }
@@ -255,18 +245,18 @@ object AppOrientationCompat {
         enable: Boolean,
         token: OrientationSessionPolicy.Token,
     ): WriteResult {
-        if (!allowsWrite(token, context, pkg) || !rememberAttempt(context, pkg)) return WriteResult.FAILED
+        if (!allowsWrite(token, pkg) || !rememberAttempt(context, pkg)) return WriteResult.FAILED
         val action = if (enable) "enable" else "disable"
-        if (!allowsWrite(token, context, pkg)) return WriteResult.FAILED
+        if (!allowsWrite(token, pkg)) return WriteResult.FAILED
         val first = writeChange(token, context, pkg, CHANGE_UNDEFINED_TO_NOSENSOR, enable) ?: return WriteResult.PROTECTED
         val second =
-            if (first.ok && allowsWrite(token, context, pkg)) {
+            if (first.ok && allowsWrite(token, pkg)) {
                 writeChange(token, context, pkg, CHANGE_ANY_ORIENTATION, enable) ?: return WriteResult.PROTECTED
             } else {
                 // 第一条就被拒时不再写第二条（同一限制，省一次无谓的 shell 往返）
                 first
             }
-        if (!allowsWrite(token, context, pkg)) return WriteResult.FAILED
+        if (!allowsWrite(token, pkg)) return WriteResult.FAILED
         if (first.ok && second.ok) {
             if (!enable) forgetAttempt(context, pkg)
             prefs(context).edit().putBoolean(key(pkg), enable).apply()
@@ -417,12 +407,12 @@ object AppOrientationCompat {
     private fun applyAllForToken(context: Context, token: OrientationSessionPolicy.Token): Int {
         if (!sessionPolicy.isActive(token)) return 0
         val enabled = enabledPkgs(context)
-        val eligible = enabled.filter { allowsWrite(token, context, it) }
+        val eligible = enabled.filter { allowsWrite(token, it) }
         val pkgs = eligible.filter { OrientationPackage.inspect(context, it).mayRestart }
         if (eligible.size > pkgs.size) {
             diagSink?.invoke("ORIENTATION: 已跳过 VPN 或无法核实的应用 ${eligible.size - pkgs.size} 个，避免重启其服务")
         }
-        val protectedCount = enabled.count { isProtectedPackage(context, it) }
+        val protectedCount = enabled.count { isProtectedPackage(it) }
         if (protectedCount > 0) {
             diagSink?.invoke("ORIENTATION: 手机导航保护 $protectedCount 个地图包，保留横屏偏好，本轮不写系统覆盖")
         }
@@ -440,8 +430,8 @@ object AppOrientationCompat {
         var count = 0
         for (pkg in pkgs) {
             if (!sessionPolicy.isActive(token)) break
-            if (!allowsWrite(token, context, pkg) || !rememberAttempt(context, pkg)) continue
-            if (!allowsWrite(token, context, pkg)) break
+            if (!allowsWrite(token, pkg) || !rememberAttempt(context, pkg)) continue
+            if (!allowsWrite(token, pkg)) break
             val first = writeChange(token, context, pkg, CHANGE_UNDEFINED_TO_NOSENSOR, true) ?: continue
             if (!first.ok) {
                 // ChangeId 已注册仍被拒 → user build 不允许改非 debuggable 应用；
@@ -455,9 +445,9 @@ object AppOrientationCompat {
                 }
                 continue
             }
-            if (!allowsWrite(token, context, pkg)) break
+            if (!allowsWrite(token, pkg)) break
             val second = writeChange(token, context, pkg, CHANGE_ANY_ORIENTATION, true) ?: continue
-            if (second.ok && allowsWrite(token, context, pkg)) count++
+            if (second.ok && allowsWrite(token, pkg)) count++
         }
         return count
     }
@@ -484,22 +474,21 @@ object AppOrientationCompat {
         val candidates = sessionPolicy.resetCandidates(
             token,
             attempted,
-            PhoneNavigationPrefs.enabled(context),
             legacyEnabled = if (recoverLegacy) enabledPkgs(context).toSet() else emptySet(),
             recoverLegacy = recoverLegacy,
         )
-        val protectedCount = attempted.count { isProtectedPackage(context, it) }
+        val protectedCount = attempted.count { isProtectedPackage(it) }
         if (sessionPolicy.isCurrent(token) && protectedCount > 0) {
             diagSink?.invoke("ORIENTATION: 保留 $protectedCount 个受保护地图包的待复原记录，不打断手机导航")
         }
         for (pkg in candidates) {
-            if (!allowsWrite(token, context, pkg)) continue
+            if (!allowsWrite(token, pkg)) continue
             if (!rememberAttempt(context, pkg)) continue
-            if (!allowsWrite(token, context, pkg)) break
+            if (!allowsWrite(token, pkg)) break
             val first = writeChange(token, context, pkg, CHANGE_UNDEFINED_TO_NOSENSOR, false) ?: continue
-            if (!allowsWrite(token, context, pkg)) break
+            if (!allowsWrite(token, pkg)) break
             val second = writeChange(token, context, pkg, CHANGE_ANY_ORIENTATION, false) ?: continue
-            if (first.ok && second.ok && allowsWrite(token, context, pkg)) {
+            if (first.ok && second.ok && allowsWrite(token, pkg)) {
                 forgetAttempt(context, pkg)
                 count++
             }
@@ -564,13 +553,13 @@ object AppOrientationCompat {
         val token = sessionPolicy.token()
         registerWork()
         try {
-            if (!allowsWrite(token, app, key)) return false
+            if (!allowsWrite(token, key)) return false
             if (!rememberAttempt(app, key)) return false
-            if (!allowsWrite(token, app, key)) return false
+            if (!allowsWrite(token, key)) return false
             val ok1 = writeChange(token, app, key, CHANGE_UNDEFINED_TO_NOSENSOR, false)?.ok == true
-            if (!allowsWrite(token, app, key)) return false
+            if (!allowsWrite(token, key)) return false
             val ok2 = writeChange(token, app, key, CHANGE_ANY_ORIENTATION, false)?.ok == true
-            if (!allowsWrite(token, app, key)) return false
+            if (!allowsWrite(token, key)) return false
             if (ok1 && ok2) forgetAttempt(app, key)
             return ok1 && ok2
         } finally {
@@ -586,7 +575,7 @@ object AppOrientationCompat {
         enable: Boolean,
     ): Shell.Result? {
         val action = OrientationPackage.inspect(context, key).compatAction(enable) ?: return null
-        if (!allowsWrite(token, context, key)) return null
+        if (!allowsWrite(token, key)) return null
         // A failed no-kill cleanup stays pending; never retry it with a package restart.
         val quotedKey = "'" + key.replace("'", "'\\''") + "'"
         return Shell.exec("am compat $action $change $quotedKey", timeoutMs = 4000)
@@ -601,7 +590,7 @@ object AppOrientationCompat {
 
     /** 「应用横屏」名单（包名集合）：letterbox 提示探测用，只读。 */
     fun enabledPackages(context: Context): Set<String> =
-        enabledPkgs(context).filterNot { isProtectedPackage(context, it) }.toSet()
+        enabledPkgs(context).filterNot { isProtectedPackage(it) }.toSet()
 }
 
 /**

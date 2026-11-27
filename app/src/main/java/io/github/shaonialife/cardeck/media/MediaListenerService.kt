@@ -184,12 +184,15 @@ class MediaListenerService : NotificationListenerService() {
                 val meta = controller.metadata
                 val state = controller.playbackState
                 val playing = state?.state == PlaybackState.STATE_PLAYING
-                val title = meta?.getString(MediaMetadata.METADATA_KEY_TITLE)
+                val video = controller.packageName in CarVideoSources.labels
+                val title = meta?.getString(MediaMetadata.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() }
+                    ?: if (video) meta?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE) else null
                 MediaSessionsState.NowPlaying(
                     title = title,
                     artist =
                         meta?.getString(MediaMetadata.METADATA_KEY_ARTIST)
-                            ?: meta?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST),
+                            ?: meta?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST)
+                            ?: if (video) meta?.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE) else null,
                     playing = playing,
                     art = artFor(controller, meta, title),
                     pkg = controller.packageName,
@@ -218,6 +221,10 @@ class MediaListenerService : NotificationListenerService() {
         playing: Boolean,
     ): PlayerLyrics? {
         val pkg = controller.packageName
+        if (pkg in CarVideoSources.labels) {
+            if (primary) setOnlineOwner(null)
+            return null
+        }
         // 歌名/作者/媒体 ID 与会话一起定界；中间的空元数据也必须清空 UI。
         val mediaId = meta?.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
         val artist = meta?.getString(MediaMetadata.METADATA_KEY_ARTIST)

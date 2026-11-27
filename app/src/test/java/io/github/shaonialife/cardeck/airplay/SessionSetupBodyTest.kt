@@ -18,7 +18,7 @@ class SessionSetupBodyTest {
     private fun client() =
         AirPlayClient(
             Iap2SenderSession.CarPlayEndpoint(
-                ssid = "DESKTOP-43KNTO6",
+                ssid = "TestReceiver",
                 passphrase = "secret",
                 channel = 0,
                 securityType = 2,
@@ -33,14 +33,14 @@ class SessionSetupBodyTest {
 
     @Test
     fun deviceIdIsCarriedVerbatimIntoSetupBody() {
-        val body = client().buildSessionSetupBody("10:C1:97:1A:C7:44", timingPort = 35449)
+        val body = client().buildSessionSetupBody("02:00:00:00:58:01", timingPort = 35449)
         val root = BinaryPlist.parse(body) as Map<*, *>
-        assertEquals("10:C1:97:1A:C7:44", root["deviceID"])
+        assertEquals("02:00:00:00:58:01", root["deviceID"])
     }
 
     @Test
     fun deviceIdIsNotTheCatplayPlaceholder() {
-        val body = client().buildSessionSetupBody("10:C1:97:1A:C7:44", timingPort = 35449)
+        val body = client().buildSessionSetupBody("02:00:00:00:58:01", timingPort = 35449)
         val root = BinaryPlist.parse(body) as Map<*, *>
         assertNotEquals("ff:ee:dd:cc:bb:aa", root["deviceID"])
     }
@@ -48,7 +48,7 @@ class SessionSetupBodyTest {
     @Test
     fun bodyKeepsTheFieldsReceiversNegotiateOn() {
         val port = 35449
-        val body = client().buildSessionSetupBody("10:C1:97:1A:C7:44", port)
+        val body = client().buildSessionSetupBody("02:00:00:00:58:01", port)
         val root = BinaryPlist.parse(body) as Map<*, *>
         // timingPort 是媒体时钟同步入口；features 决定 enabledFeatures（缺失即视频管线不启用）
         assertEquals(port.toLong(), root["timingPort"])
@@ -65,7 +65,7 @@ class SessionSetupBodyTest {
     fun unpairedSessionDeclaresEtNone() {
         val root =
             BinaryPlist.parse(
-                client().buildSessionSetupBody("10:C1:97:1A:C7:44", 35449, encrypted = false),
+                client().buildSessionSetupBody("02:00:00:00:58:01", 35449, encrypted = false),
             ) as Map<*, *>
         assertEquals(1L, root["et"])
         assertEquals(false, root["updateSessionRequest"])
@@ -75,7 +75,7 @@ class SessionSetupBodyTest {
     fun pairedSessionOmitsEt() {
         val root =
             BinaryPlist.parse(
-                client().buildSessionSetupBody("10:C1:97:1A:C7:44", 35449, encrypted = true),
+                client().buildSessionSetupBody("02:00:00:00:58:01", 35449, encrypted = true),
             ) as Map<*, *>
         assertNull(root["et"])
     }

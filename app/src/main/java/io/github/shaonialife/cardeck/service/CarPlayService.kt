@@ -128,12 +128,11 @@ class CarPlayService : Service() {
     override fun onDestroy() {
         SessionController.stopVpnCoexistence()
         releaseLocks()
-        // Android 14+：MediaProjection 与前台的 mediaProjection 类型绑定——
-        // 保活服务停止（如用户点「断开连接」）时系统会连带停止投影。
-        fileLog(
-            "SVC: onDestroy（保活服务停止）mediaProjection=" +
-                (if (mediaProjection != null) "仍在（即将被系统回收）" else "null"),
-        )
+        // Explicitly retire the current grant on all supported Android versions.
+        val projection = mediaProjection
+        mediaProjection = null
+        projection?.let { runCatching { it.stop() } }
+        fileLog("SVC: 保活服务停止，本次声音共享授权已结束")
         super.onDestroy()
     }
 
@@ -171,7 +170,7 @@ class CarPlayService : Service() {
             manager.createNotificationChannel(
                 NotificationChannel(
                     CHANNEL_ID,
-                    "CarDeck 连接",
+                    "BmwDeck 连接",
                     NotificationManager.IMPORTANCE_LOW,
                 ).apply {
                     description = "保持与车机的连接"
@@ -192,7 +191,7 @@ class CarPlayService : Service() {
         return NotificationCompat
             .Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("CarDeck 运行中")
+            .setContentTitle("BmwDeck 运行中")
             .setContentText("正在保持与车机的连接，点开应用可查看日志")
             .setContentIntent(contentIntent)
             .setAutoCancel(false)

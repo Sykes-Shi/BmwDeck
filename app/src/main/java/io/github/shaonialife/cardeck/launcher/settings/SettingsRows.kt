@@ -96,7 +96,7 @@ object SettingsRows {
                     TextView(fragment.requireContext()).apply {
                         text = letter
                         textSize = 9f
-                        setTextColor(0xFF8E8E93.toInt())
+                        setTextColor(panelTextColor(R.attr.panelMuted))
                         setPadding(0, (1.5f * density).toInt(), 0, (1.5f * density).toInt())
                         setOnClickListener {
                             val target =
@@ -210,4 +210,11 @@ abstract class AppRowsAdapter(
             }
         }
     }
+}
+
+/** Shared panel views resolve colors against the phone or projected settings host. */
+internal fun TextView.panelTextColor(attribute: Int): Int {
+    val color = android.util.TypedValue()
+    context.theme.resolveAttribute(attribute, color, true)
+    return color.data
 }

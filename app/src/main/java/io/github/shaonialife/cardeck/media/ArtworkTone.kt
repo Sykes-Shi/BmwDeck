@@ -62,6 +62,37 @@ internal object ArtworkTone {
         return intArrayOf(start, mix(start, -1, 42), mix(start, -1, 85))
     }
 
+    /** Translucent pigment; both car layouts draw this over their existing theme surface. */
+    fun glassStops(seed: Int?, averageTone: Int, surface: Int, day: Boolean): IntArray {
+        val opaque = if (day) {
+            daylightStops(seed, surface)
+        } else {
+            val base = mix(averageTone, surface, 66)
+            var lit = seed?.let { nightPigment(it, base) } ?: base
+            // A white cover on pale wallpaper still needs contrast with the night lyrics.
+            while (relativeLuminance(lit) > 0.043) lit = mix(lit, surface, 10)
+            val shadow = mix(lit, base, 72)
+            intArrayOf(lit, mix(lit, shadow, 44), shadow)
+        }
+        // Leave a little of the frosted wallpaper visible without letting its detail dominate.
+        val alpha = if (day) 242 else 238
+        return IntArray(opaque.size) { (opaque[it] and 0x00ffffff) or (alpha shl 24) }
+    }
+
+    private fun nightPigment(seed: Int, base: Int): Int {
+        val r = seed ushr 16 and 255
+        val g = seed ushr 8 and 255
+        val b = seed and 255
+        val low = minOf(r, g, b)
+        val chroma = maxOf(r, g, b) - low
+        if (chroma < 24) return mix(seed, base, 75)
+        // Ink, paper and skin-tone covers should keep their warmth on the blue-black night surface.
+        val floor = 30 + low / 52
+        val span = (29 + chroma / 6).coerceAtMost(56)
+        fun channel(value: Int) = floor + (value - low) * span / chroma
+        return rgb(channel(r), channel(g), channel(b))
+    }
+
     private fun rgb(r: Int, g: Int, b: Int) = (255 shl 24) or (r shl 16) or (g shl 8) or b
 
     private fun mix(a: Int, b: Int, percent: Int): Int {

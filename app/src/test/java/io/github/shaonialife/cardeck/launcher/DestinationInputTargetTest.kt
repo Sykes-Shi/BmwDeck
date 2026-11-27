@@ -1,41 +1,33 @@
 package io.github.shaonialife.cardeck.launcher
 
-import java.net.URI
-import java.net.URLDecoder
 import org.junit.Assert.*
 import org.junit.Test
 
 class DestinationInputTargetTest {
-    @Test fun laterSessionsPagesPhoneNavigationChangesAndScreenLoansInvalidatePhoneEntry() {
-        val search = DestinationInputTarget(118, 8, 1, 5, 0)
-        assertTrue(search.matches(118, 8, 1, 5, 0))
-        assertFalse(search.matches(0, 8, 1, 5, 0))
-        assertFalse(search.matches(118, 9, 1, 5, 0))
-        assertFalse(search.matches(118, 8, 2, 5, 0))
-        assertFalse(search.matches(118, 8, 1, 6, 0))
-        assertFalse(search.matches(118, 8, 1, 5, null))
+    @Test fun onlyVisibleKeyboardBoundToTheCarMapCanConsumeBack() {
+        val current = "mInputShown=true\nmCurTokenDisplayId=118\n"
+        assertTrue(keyboardShownOnDisplay(current, 118))
+        assertFalse(keyboardShownOnDisplay(current, 119))
+        assertFalse(keyboardShownOnDisplay(current.replace("true", "false"), 118))
+        assertFalse(keyboardShownOnDisplay("mInputShown=true", 118))
+        assertFalse(keyboardShownOnDisplay("mCurTokenDisplayId=0\nmInputShown=true", 0))
+        assertFalse(keyboardShownOnDisplay(current + "mCurTokenDisplayId=16\n", 118))
     }
 
-    @Test fun keywordIsOneEncodedParameterIncludingChineseAndShellPunctuation() {
-        val query = "人民广场 A+B & 1#2's"
-        val uri = URI(baiduKeywordSearchUri("  $query  ")!!)
-        assertEquals("baidumap", uri.scheme)
-        assertEquals("map", uri.host)
-        assertEquals("/place/search", uri.path)
-        val params = uri.rawQuery.split('&')
-        assertEquals(2, params.size)
-        assertEquals(query, URLDecoder.decode(params[0].removePrefix("query="), "UTF-8"))
-        assertEquals("src=andr.shaonialife.cardeck", params[1])
-        assertNull(baiduKeywordSearchUri("  "))
-        assertNull(baiduKeywordSearchUri("字".repeat(129)))
-    }
-
-    @Test fun diagnosticWorkIsBoundedAndNotRepeatedForEveryKey() {
-        val target = DestinationInputTarget(118, 8, 1, 5, 0)
-        assertTrue(target.claimKeyboardProbe(0))
-        assertFalse(target.claimKeyboardProbe(500))
-        assertTrue(target.claimKeyboardProbe(3500))
-        assertTrue(target.claimKeyboardProbe(7000))
-        assertFalse(target.claimKeyboardProbe(12000))
+    @Test fun searchDensityTracksItsOwnSceneAndRestoresAfterTheImeSettles() {
+        val layout = BaiduKeyboardLayout()
+        assertEquals(300, layout.density(300, 5))
+        assertTrue(layout.observe(5, true, 0))
+        assertEquals(240, layout.density(300, 5))
+        assertEquals(180, layout.density(180, 5))
+        assertFalse(layout.observe(5, false, 450))
+        assertFalse(layout.observe(5, true, 700))
+        assertFalse(layout.observe(5, false, 900))
+        assertFalse(layout.observe(5, false, 1200))
+        assertTrue(layout.observe(5, false, 2000))
+        assertEquals(300, layout.density(300, 5))
+        assertTrue(layout.observe(5, true, 2400))
+        assertEquals(300, layout.density(300, 6))
+        assertTrue(layout.observe(6, false, 2500))
     }
 }

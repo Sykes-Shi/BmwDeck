@@ -51,6 +51,10 @@ internal object CarControllerRouter {
                 CarControllerAction.PREVIOUS -> VirtualLauncher.noteRotaryTurn(-input.steps)
                 else -> Unit
             }
+            if (VirtualLauncher.routeAppPointer(input, ::sameScene)) {
+                contentEpoch++
+                return@post
+            }
             if (DockActivity.handleController(input, arrives, ::sameScene, live)) {
                 contentEpoch++
                 return@post
@@ -62,7 +66,7 @@ internal object CarControllerRouter {
     }
 
     fun onTouchDown(inDock: Boolean) {
-        main.post { DockActivity.onControllerTouch(inDock) }
+        main.post { VirtualLauncher.cancelAppPointer(); DockActivity.onControllerTouch(inDock) }
     }
 
     private fun submitToContent(input: CarControllerInput, display: Int, current: () -> Boolean) {
@@ -70,6 +74,7 @@ internal object CarControllerRouter {
             worker.execute {
                 if (!current()) return@execute
                 if (input.action == CarControllerAction.BACK && VirtualLauncher.mapFullscreen) {
+                    if (VirtualLauncher.dismissBaiduKeyboard(display, current)) return@execute
                     main.post { if (current() && VirtualLauncher.mapFullscreen) VirtualLauncher.onHomePressed() }
                     return@execute
                 }

@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/phone_card">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:id="@+id/connectionAudioTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="连接声音"
+            android:textColor="@color/phone_ink"
+            android:textSize="21sp"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/connectionAudioChoices"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp">
+
+            <RadioButton
+                android:id="@+id/askEachConnection"
+                style="@style/PhoneAudioChoice"
+                android:text="每次询问" />
+
+            <RadioButton
+                android:id="@+id/connectWithoutSound"
+                style="@style/PhoneAudioChoice"
+                android:text="仅画面" />
+
+            <RadioButton
+                android:id="@+id/connectWithSound"
+                style="@style/PhoneAudioChoice"
+                android:text="车机播放声音" />
+        </RadioGroup>
+
+        <TextView
+            android:id="@+id/soundSourceNote"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp"
+            android:text="将手机正在播放的声音（含音乐、视频和导航）传到车机。需要在 Android 窗口确认本次共享，断开或撤销后停止采音。"
+            android:textColor="@color/phone_muted"
+            android:textSize="13sp" />
+
+        <CheckBox
+            android:id="@+id/preferFullDisplay"
+            style="@style/PhoneAudioChoice"
+            android:text="直接请求共享整个屏幕" />
+
+        <CheckBox
+            android:id="@+id/rememberAudioChoice"
+            style="@style/PhoneAudioChoice"
+            android:text="记住本次选择" />
+
+        <Button
+            android:id="@+id/requestAudioPermission"
+            style="@style/PhoneAudioAction"
+            android:text="申请本次共享授权" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:gravity="end"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/audioCancel"
+                style="@style/PhoneAudioAction"
+                android:text="取消" />
+
+            <Button
+                android:id="@+id/audioApply"
+                style="@style/PhoneAudioAction"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/phone_cta"
+                android:text="连接"
+                android:textColor="@color/phone_on_cta" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

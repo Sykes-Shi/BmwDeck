@@ -439,7 +439,7 @@ class Iap2LinkEngine(
                 //  ② 序号不能撞：裸 ACK 用当前 sentSequence，而 SYN|ACK 会自增，下一次
                 //     裸 ACK 就复用上一帧 SYN|ACK 的序号——BMW 把同序号帧当重复丢弃；
                 //  ③ 重传同一 SYN 时整帧原样重放，字节级幂等。
-                // 2026-10-19 BMW 87866 定谳：旧实现在首次采纳后只回裸 ACK，该车机每轮
+                // 2026-10-19 某款宝马车机 定谳：旧实现在首次采纳后只回裸 ACK，该车机每轮
                 // 重试都用新序号重开协商（161→191→40…），因此 14 轮全部卡在协商、
                 // 一次 0x1D00 都没走到（日志：133 条 SYN / 0 条 ACK）。
                 sendSynchronizationEcho(sync, sequence)

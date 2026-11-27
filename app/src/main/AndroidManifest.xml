@@ -37,8 +37,7 @@
     <queries>
         <package android:name="com.samsung.android.bixby.agent" />
         <package android:name="moe.shizuku.privileged.api" />
-        <package android:name="com.autonavi.amapauto" />
-        <package android:name="com.autonavi.minimap" />
+        <package android:name="com.baidu.naviauto" />
         <intent>
             <action android:name="android.net.VpnService" />
         </intent>
@@ -64,6 +63,7 @@
              依赖屏幕尺寸的弹窗窗口在 onConfigurationChanged 里重算。 -->
         <activity
             android:name=".MainActivity"
+            android:theme="@style/Theme.CarPlaySender.PhoneHome"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:exported="true"
             android:launchMode="singleTask">
@@ -78,9 +78,11 @@
              首页才是要保留滚动/折叠/已填内容的长驻操作台。 -->
         <activity
             android:name=".PhoneSettingsActivity"
+            android:theme="@style/Theme.CarPlaySender.Phone"
             android:exported="false" />
         <activity
             android:name=".SettingsContentActivity"
+            android:theme="@style/Theme.CarPlaySender.PhoneSettings"
             android:exported="false" />
 
         <service

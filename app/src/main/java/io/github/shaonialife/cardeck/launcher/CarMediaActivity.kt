@@ -1,5 +1,7 @@
 package io.github.shaonialife.cardeck.launcher
 
+import io.github.shaonialife.cardeck.media.NetEaseCarEdition
+
 import android.content.Intent
 import android.graphics.Outline
 import android.os.Bundle
@@ -18,13 +20,13 @@ import io.github.shaonialife.cardeck.media.TargetedMediaControls
 import io.github.shaonialife.cardeck.util.Bg
 import java.util.Locale
 
-/** 自有车载播放页只呈现媒体会话；选歌仍交给原应用，保持账号与曲库行为。 */
+/** 车载播放页使用指定播放器的媒体会话；完整曲库由原应用打开。 */
 class CarMediaActivity : CarControllerActivity() {
     companion object {
         const val EXTRA_TARGET_PACKAGE = "car_media_target_package"
         const val EXTRA_LAUNCH_SESSION = "car_media_session"
         const val EXTRA_LAUNCH_REQUEST = "car_media_request"
-        const val NETEASE_PACKAGE = "com.netease.cloudmusic"
+        const val NETEASE_PACKAGE = NetEaseCarEdition.MOBILE
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -35,6 +37,7 @@ class CarMediaActivity : CarControllerActivity() {
     private var started = false
     private var pageReady = false
     private var commandPending = false
+    private var opening = false
     private var displayed: MediaSessionsState.NowPlaying? = null
     private var artwork: android.graphics.Bitmap? = null
     private var backdrop: MediaBackdrop? = null
@@ -50,7 +53,7 @@ class CarMediaActivity : CarControllerActivity() {
         LauncherActivityTracker.onCreated(this, display?.displayId ?: -1)
         setContentView(R.layout.activity_car_media)
         pageReady = true
-        backdrop = MediaBackdrop(findViewById(R.id.carMediaBackdrop), findViewById(R.id.carMediaBackdropVeil))
+        backdrop = MediaBackdrop(findViewById(R.id.carMediaBackdrop))
         findViewById<View>(R.id.carMediaBack).setOnClickListener { returnHome() }
         findViewById<View>(R.id.carMediaOpenOriginal).setOnClickListener { openOriginal() }
         findViewById<View>(R.id.carMediaPrevious).setOnClickListener { send(TargetedMediaControls.Command.PREVIOUS) }
@@ -98,8 +101,12 @@ class CarMediaActivity : CarControllerActivity() {
     private fun readIntent(value: Intent) {
         launchSession = value.getLongExtra(EXTRA_LAUNCH_SESSION, -1L)
         launchRequest = value.getLongExtra(EXTRA_LAUNCH_REQUEST, -1L)
-        targetPackage = value.getStringExtra(EXTRA_TARGET_PACKAGE)?.takeIf { it.matches(Regex("[A-Za-z0-9_.]+")) } ?: NETEASE_PACKAGE
-        targetLabel = if (targetPackage == NETEASE_PACKAGE) "网易云音乐" else runCatching {
+        setTarget(value.getStringExtra(EXTRA_TARGET_PACKAGE)?.takeIf { it.matches(Regex("[A-Za-z0-9_.]+")) } ?: NETEASE_PACKAGE)
+    }
+
+    private fun setTarget(pkg: String) {
+        targetPackage = pkg
+        targetLabel = if (pkg == NETEASE_PACKAGE) "网易云音乐" else runCatching {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(targetPackage, 0)).toString()
         }.getOrDefault("音乐应用")
         displayed = null
@@ -164,8 +171,12 @@ class CarMediaActivity : CarControllerActivity() {
         if (!validSession()) return
         val now = MediaSessionsState.forPackage(targetPackage)
         displayed = now
-        findViewById<TextView>(R.id.carMediaSource).text = "$targetLabel · 车载播放"
-        findViewById<TextView>(R.id.carMediaOpenOriginal).text = if (targetPackage == NETEASE_PACKAGE) "打开网易云选歌" else "打开${targetLabel}选歌"
+        findViewById<TextView>(R.id.carMediaSource).text = targetLabel
+        findViewById<TextView>(R.id.carMediaOpenOriginal).apply {
+            text = "打开音乐应用"
+            contentDescription = "打开${targetLabel}"
+            isEnabled = !opening
+        }
         findViewById<TextView>(R.id.carMediaTitle).text = now?.title?.takeIf { it.isNotBlank() } ?: "选择一首音乐"
         findViewById<TextView>(R.id.carMediaArtist).text = now?.artist.orEmpty()
         val elapsed = SystemClock.elapsedRealtime()
@@ -187,7 +198,7 @@ class CarMediaActivity : CarControllerActivity() {
             cover.setImageBitmap(artwork)
         }
         cover.visibility = if (artwork == null) View.INVISIBLE else View.VISIBLE
-        backdrop?.bind(artwork, now?.backdropColor ?: ArtworkTone.DEFAULT, now?.daylightColor, carPalette)
+        backdrop?.bind(artwork != null, now?.backdropColor ?: ArtworkTone.DEFAULT, now?.daylightColor, carPalette)
         val lyricText = if (MediaSessionsState.accessGranted) now?.lyricTextAt(elapsed) else null
         val lyricStatus = if (MediaSessionsState.accessGranted && now != null && now.lyrics == null) {
             io.github.shaonialife.cardeck.media.OnlineLyrics.statusFor(this, now.pkg, now.title, now.artist, now.durationMs)
@@ -226,7 +237,7 @@ class CarMediaActivity : CarControllerActivity() {
             R.id.carMediaNext to TargetedMediaControls.Command.NEXT,
         ).forEach { (id, command) ->
             findViewById<View>(id).apply {
-                isEnabled = !commandPending && MediaSessionsState.accessGranted && TargetedMediaControls.supported(now, command)
+                isEnabled = !opening && !commandPending && MediaSessionsState.accessGranted && TargetedMediaControls.supported(now, command)
                 alpha = if (isEnabled) 1f else 0.3f
             }
         }
@@ -245,24 +256,31 @@ class CarMediaActivity : CarControllerActivity() {
             runOnUiThread {
                 commandPending = false
                 if (!started || !validSession()) return@runOnUiThread
-                if (!ok) showFeedback("播放状态已变化，请稍后重试或打开原应用")
+                if (!ok && targetPackage == expected.pkg) showFeedback("播放状态已变化，请稍后重试或打开原应用")
                 render()
             }
         }
     }
 
     private fun openOriginal() {
-        if (!validSession()) return
+        if (opening || !validSession()) return
         val component = packageManager.getLaunchIntentForPackage(targetPackage)?.component
         if (component == null) { showFeedback("没有找到${targetLabel}的打开入口"); return }
         val ownerDisplay = display?.displayId ?: -1
         val ownerSession = launchSession
         val ownerNavigation = VirtualLauncher.navigationRevision()
+        val ownerPresentation = VirtualLauncher.presentationRevision()
+        val ownerRequest = launchRequest
+        opening = true
+        render()
         Bg.run("car-media-original") {
-            if (!VirtualLauncher.ownsCarMedia(ownerDisplay, ownerSession)) return@run
-            val ok = VirtualLauncher.launchApp(component, expectedSession = ownerSession, expectedNavigation = ownerNavigation)
+            val ok = VirtualLauncher.ownsCarMedia(ownerDisplay, ownerSession) &&
+                VirtualLauncher.presentationRevision() == ownerPresentation &&
+                VirtualLauncher.launchApp(component, expectedSession = ownerSession, expectedNavigation = ownerNavigation)
             runOnUiThread {
-                if (ok && !isDestroyed) finish() else if (started) showFeedback("打开失败，请返回首页重试")
+                opening = false
+                if (ownerRequest != launchRequest || isDestroyed) return@runOnUiThread
+                if (ok) finish() else if (started) showFeedback("打开失败，请返回首页重试")
             }
         }
     }

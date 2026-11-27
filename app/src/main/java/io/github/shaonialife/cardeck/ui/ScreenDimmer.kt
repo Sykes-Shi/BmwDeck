@@ -35,7 +35,6 @@ object ScreenDimmer {
     @Volatile var enabled: Boolean = true
     @Volatile var logSink: ((String) -> Unit)? = null
     @Volatile private var sessionActive = false
-    @Volatile private var phoneNavigationMode = false
     @Volatile private var manualRequested = false
     @Volatile private var dimShown = false
     @Volatile private var overlayReady = false
@@ -53,7 +52,8 @@ object ScreenDimmer {
         var dimView: View? = null
         var watchView: View? = null
         var receiver: BroadcastReceiver? = null
-        val showRunnable = Runnable { if (attachment === this) showDim(this, force = false) }
+        var idleRevision = 0L
+        val showRunnable = Runnable { if (attachment === this) checkPhoneBeforeAutoDim(this) }
     }
 
     private fun onMain(block: () -> Unit) {
@@ -142,13 +142,6 @@ object ScreenDimmer {
 
     fun refreshOptions() = applyOptions()
 
-    /** 连接时快照的手机导航用法仅暂停自动暗幕，不改用户偏好；手动暗幕仍可使用。 */
-    fun setPhoneNavigationMode(active: Boolean) {
-        if (phoneNavigationMode == active) return
-        phoneNavigationMode = active
-        applyOptions()
-    }
-
     fun disableDim() {
         enabled = false
         applyOptions()
@@ -158,8 +151,7 @@ object ScreenDimmer {
         enabled: Boolean,
         sessionActive: Boolean,
         attached: Boolean,
-        phoneNavigation: Boolean = false,
-    ): Boolean = enabled && sessionActive && attached && !phoneNavigation
+    ): Boolean = enabled && sessionActive && attached
 
     internal fun mayShowUnlocked(interactive: Boolean?, keyguardLocked: Boolean?, deviceLocked: Boolean?): Boolean =
         interactive == true && keyguardLocked == false && deviceLocked == false
@@ -170,7 +162,6 @@ object ScreenDimmer {
                 attachment = null
                 transitions.incrementAndGet()
                 sessionActive = false
-                phoneNavigationMode = false
                 manualRequested = false
                 dimShown = false
                 overlayReady = false
@@ -187,11 +178,14 @@ object ScreenDimmer {
             old.watchView = null
             old.receiver = null
             old.wm = null
+            PhoneWindowFrame.refreshDim()
             emit(old.context, "detached")
         }
     }
 
     fun isAttached(): Boolean = attachment != null && overlayReady
+
+    internal fun isDimShown(): Boolean = dimShown
 
     /** 手动暗幕只在已解锁且屏幕可交互时显示；点击撤掉并恢复窗口亮度。 */
     fun enterDimNow() {
@@ -238,16 +232,30 @@ object ScreenDimmer {
             .onFailure { emit(owner.context, "watcher_add_failed=${it.javaClass.simpleName}") }
     }
 
+    private fun checkPhoneBeforeAutoDim(owner: Attachment) {
+        val idle = owner.idleRevision
+        val session = transitions.get()
+        Bg.run("dimmer-phone-map") {
+            val state = Shell.exec("dumpsys -t 2 activity activities", timeoutMs = 3000)
+            val phoneMap = io.github.shaonialife.cardeck.launcher.phoneBaiduInForeground(state.output)
+            postOwned(owner) {
+                if (owner.idleRevision != idle || transitions.get() != session) return@postOwned
+                if (!state.ok || phoneMap) schedule(owner) else showDim(owner, force = false)
+            }
+        }
+    }
+
     private fun schedule(owner: Attachment) {
+        owner.idleRevision++
         mainHandler.removeCallbacks(owner.showRunnable)
-        if (attachment === owner && shouldAutoDim(enabled, sessionActive, overlayReady, phoneNavigationMode) && screenState(owner.context).allowsDim()) {
+        if (attachment === owner && shouldAutoDim(enabled, sessionActive, overlayReady) && screenState(owner.context).allowsDim()) {
             mainHandler.postDelayed(owner.showRunnable, IDLE_TIMEOUT_MS)
         }
     }
 
     private fun showDim(owner: Attachment, force: Boolean) {
         val revision = transitions.get()
-        if (attachment !== owner || (!force && !shouldAutoDim(enabled, sessionActive, overlayReady, phoneNavigationMode))) return
+        if (attachment !== owner || (!force && !shouldAutoDim(enabled, sessionActive, overlayReady))) return
         if (!screenState(owner.context).allowsDim()) {
             emit(owner.context, "show_skipped_locked_or_not_interactive ${diagnosticSnapshot(owner.context)}")
             return
@@ -285,6 +293,7 @@ object ScreenDimmer {
                 return@onSuccess
             }
             mainHandler.removeCallbacks(owner.showRunnable)
+            PhoneWindowFrame.refreshDim()
             emit(owner.context, "shown black=opaque windowBrightness=0 ${diagnosticSnapshot(owner.context)}")
         }.onFailure { emit(owner.context, "show_failed=${it.javaClass.simpleName}") }
     }
@@ -299,6 +308,7 @@ object ScreenDimmer {
                 manualRequested = false
             }
         }
+        PhoneWindowFrame.refreshDim()
         emit(owner.context, "hidden windowBrightness=system")
     }
 
@@ -323,7 +333,7 @@ object ScreenDimmer {
         val state = screenState(context)
         val pending = context.getSharedPreferences("settings", Context.MODE_PRIVATE).contains(BACKUP_KEY)
         return "interactive=${state.interactive} keyguard=${state.keyguard} deviceLocked=${state.deviceLocked} " +
-            "displayState=${state.displayState} autoDim=$enabled session=$sessionActive phoneNavigation=$phoneNavigationMode " +
+            "displayState=${state.displayState} autoDim=$enabled session=$sessionActive " +
             "overlayReady=$overlayReady dimShown=$dimShown manual=$manualRequested timeoutRestorePending=$pending"
     }
 

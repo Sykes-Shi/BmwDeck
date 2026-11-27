@@ -602,6 +602,64 @@ class BmwModeBorrowGuardTest {
         assertTrue(requestUi(guard).allowed)
     }
 
+    private fun fieldLoan(id: String, unborrow: Long = 1000L): Map<String, Any?> =
+        row(id = id) + mapOf("transferPriority" to 500L, "unborrowConstraint" to unborrow)
+
+    @Test fun nov22TwoSeparateLoansThenNativeTakeWaitForAnExplicitReturn() {
+        val g = guard()
+        g.apply(command(fieldLoan("A")))
+        g.apply(command(fieldLoan("B")))
+        assertFalse(g.restoreRequestedUi(g.captureUiRestoreRevision(), true).allowed)
+        val before = g.captureUiRestoreRevision()
+        assertTrue(g.apply(command(observedTake())).contains("screenTake=1"))
+        assertEquals(null, g.controllerInputRevision())
+        assertEquals(2L, owner(g, 1))
+        assertEquals(2L, g.resources()[0]["permanentEntity"])
+        assertTrue(g.needsExplicitScreenReturn)
+        val revision = g.captureUiRestoreRevision()
+        val policy = BmwRequestUiRecoveryPolicy("BMW Group MGU-50-P") { 100L }
+        repeat(4) {
+            assertEquals("awaiting_explicit_screen_return", policy.decide("requestUI", true, g.needsExplicitScreenReturn).reason)
+            assertEquals("awaiting_explicit_screen_return", g.restoreRequestedUi(revision, true, explicitReturn = false).reason)
+        }
+        assertEquals("mode_state_changed", g.restoreRequestedUi(before, true).reason)
+        assertTrue(policy.decide("requestUI", true).allowed)
+        assertEquals("bmw_take_then_request_ui", g.restoreRequestedUi(revision, true).reason)
+        assertFalse(g.needsExplicitScreenReturn)
+        assertEquals(1L, owner(g, 1))
+        assertFalse(g.restoreRequestedUi(revision, true).allowed)
+    }
+
+    @Test fun onlyTheObservedPairCanArmTheReturnAndNativeActivityStillHasPriority() {
+        val cases = listOf(
+            listOf(command(fieldLoan("A"), fieldLoan("B"))),
+            listOf(command(fieldLoan("A", 500)), command(fieldLoan("B"))),
+            listOf(command(fieldLoan("A")), command(fieldLoan("B", 500))),
+            listOf(command(fieldLoan("A")), command(fieldLoan("A")), command(fieldLoan("B"))),
+            listOf(command(fieldLoan("A")), command(fieldLoan("B")), command(fieldLoan("C"))),
+        )
+        for (commands in cases) {
+            val g = guard()
+            commands.forEach(g::apply)
+            g.apply(command(observedTake()))
+            assertFalse(g.needsExplicitScreenReturn)
+            assertFalse(g.restoreRequestedUi(g.captureUiRestoreRevision(), true).allowed)
+        }
+        val g = guard()
+        g.apply(command(fieldLoan("A")))
+        g.apply(command(fieldLoan("B")))
+        g.apply(command(observedTake()))
+        val old = g.captureUiRestoreRevision()
+        g.apply(command(fieldLoan("C")))
+        assertFalse(g.restoreRequestedUi(old, true).allowed)
+        assertFalse(g.restoreRequestedUi(g.captureUiRestoreRevision(), true).allowed)
+        g.apply(command(row(transfer = 4L, id = "C")))
+        g.apply(command(row(resource = 2L, id = "call")))
+        assertEquals("native_activity_active", g.restoreRequestedUi(g.captureUiRestoreRevision(), true).reason)
+        g.apply(command(row(resource = 2L, transfer = 4L, id = "call")))
+        assertTrue(g.restoreRequestedUi(g.captureUiRestoreRevision(), true).allowed)
+    }
+
     @Test
     fun multipleKnownBorrowsAreNotCollapsedByObservedTake() {
         val guard = guard()
@@ -745,8 +803,43 @@ class BmwModeBorrowGuardTest {
         assertEquals(1L, guard.resources()[1]["permanentEntity"])
     }
 
+    @Test fun nov23LiveNativeTakeThenMediaAndHome() {
+        var now = 46_993L
+        val guard = guard()
+        val policy = BmwRequestUiRecoveryPolicy("BMW Group MGU-50-P") { now }
+        assertTrue(policy.decide("requestUI", true).allowed)
+        policy.finishRecovery()
+        now = 47_695
+        guard.apply(command(observedTake()), projectionShowing = true)
+        val taken = guard.captureUiRestoreRevision()
+        assertFalse(guard.isScreenAvailableToController())
+        assertTrue(guard.needsExplicitScreenReturn)
+        assertEquals("awaiting_explicit_screen_return", guard.restoreRequestedUi(taken).reason)
+        now = 48_282
+        assertTrue(policy.decide("requestUI", true, nativeReturnRevision = taken).allowed)
+        assertTrue(guard.restoreRequestedUi(taken, refreshLoan = true).allowed)
+        assertTrue(guard.isScreenAvailableToController())
+        policy.finishRecovery()
+        now = 50_421
+        assertEquals("cooldown", policy.decide("requestUI", true).reason)
+        assertTrue(guard.controllerInputRevision() != null) // page selection remains available
+    }
+
+    @Test fun liveStandaloneTakeCannotReleaseAnActiveNativeActivityOrUnknownLoan() {
+        val guard = guard()
+        guard.apply(command(observedTake()), projectionShowing = true)
+        guard.apply(phoneState(true, row(2L, 3L, "call")))
+        assertEquals("native_activity_active", guard.restoreRequestedUi(guard.captureUiRestoreRevision(), true).reason)
+        guard.apply(command(row(id = null)))
+        assertFalse(guard.restoreRequestedUi(guard.captureUiRestoreRevision(), true).allowed)
+        assertFalse(guard.isScreenAvailableToController())
+        val mixed = guard()
+        mixed.apply(command(observedTake(), row(2L, 3L, "radio")), projectionShowing = true)
+        assertTrue(mixed.isScreenAvailableToController())
+    }
+
     @Test
-    fun unknownReceiverAndPlainTakeRemainLegacy() {
+    fun unknownReceiverAndStartupTakeRemainLegacy() {
         val other = guard("BMW Group different")
         other.apply(command(row()))
         other.apply(command(observedTake()))

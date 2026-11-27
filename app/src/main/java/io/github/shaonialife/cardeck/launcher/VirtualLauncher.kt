@@ -1,5 +1,7 @@
 package io.github.shaonialife.cardeck.launcher
 
+import io.github.shaonialife.cardeck.media.NetEaseCarEdition
+
 import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
@@ -10,12 +12,13 @@ import android.hardware.display.VirtualDisplay
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
+import io.github.shaonialife.cardeck.input.CarControllerAction
+import io.github.shaonialife.cardeck.input.CarControllerInput
+import io.github.shaonialife.cardeck.media.CarVideoSources
 import io.github.shaonialife.cardeck.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.cardeck.launcher.settings.DisplayPrefs
 import io.github.shaonialife.cardeck.launcher.settings.MapDisplayPrefs
 import io.github.shaonialife.cardeck.launcher.settings.MapUiScale
-import io.github.shaonialife.cardeck.launcher.settings.PhoneNavigationPrefs
-import io.github.shaonialife.cardeck.launcher.settings.PhoneNavigationSessionPolicy
 import io.github.shaonialife.cardeck.media.MediaSessionsState
 import io.github.shaonialife.cardeck.media.TargetedMediaControls
 import io.github.shaonialife.cardeck.media.NotificationAccess
@@ -23,9 +26,11 @@ import io.github.shaonialife.cardeck.net.ProjectionAppMobileData
 import io.github.shaonialife.cardeck.render.CARD_MARGIN_PX
 import io.github.shaonialife.cardeck.render.DASH_GAP_PX
 import io.github.shaonialife.cardeck.render.DASH_HANDLE_TOUCH_PX
+import io.github.shaonialife.cardeck.render.AppRailFrame
 import io.github.shaonialife.cardeck.render.DualDisplayComposer
 import io.github.shaonialife.cardeck.render.VideoBarControls
 import io.github.shaonialife.cardeck.render.OverlayCard
+import io.github.shaonialife.cardeck.shizuku.CAR_DISPLAY_CONTENT_FLAGS
 import io.github.shaonialife.cardeck.shizuku.CarInputClient
 import io.github.shaonialife.cardeck.shizuku.Shell
 import io.github.shaonialife.cardeck.shizuku.ShizukuGate
@@ -50,14 +55,13 @@ object VirtualLauncher {
 
     private class LaunchSession(
         val generation: Long,
-        phoneNavigation: Boolean = false,
-        val navigationRevision: Long = 0,
-        val cruisePolicy: BaiduCruiseSessionPolicy = BaiduCruiseSessionPolicy(),
+        @Volatile var carMapAvailable: Boolean = false,
         val controllerShortcuts: Boolean = false,
     ) {
-        val phoneNavigation = PhoneNavigationSessionPolicy(phoneNavigation, generation, navigationRevision)
-        @Volatile var baiduCruiseTile = false
+        @Volatile var navigationRevision = 0L
+        @Volatile var baiduAutoTile = false
         val dashboardMapRequests = DashboardMapRequests()
+        val baiduKeyboardLayout = BaiduKeyboardLayout()
     }
 
     private val launchGenerations = java.util.concurrent.atomic.AtomicLong()
@@ -75,56 +79,8 @@ object VirtualLauncher {
     @Volatile private var settingsShortcut: ShortcutRequest? = null
     @Volatile private var mediaShortcut: ShortcutRequest? = null
     @Volatile private var lastShortcutMusic: String? = null
-    @Volatile private var destinationInput: DestinationInputTarget? = null
-
-    /** 实时模式不重建显示或音视频会话；地图操作另有修订号。 */
-    fun isPhoneNavigationActive(): Boolean = launchSession.phoneNavigation.enabled
 
     fun navigationRevision(): Long = launchSession.navigationRevision
-
-    enum class NavigationSwitchResult { UPDATED, UNCHANGED, BUSY, NOT_CONNECTED }
-
-    /** 仅作内存/布局切换，不迁移、结束或重启手机地图。忙时立即返回，不阻塞设置页。 */
-    fun setPhoneNavigationEnabled(enabled: Boolean, expectedSession: Long): NavigationSwitchResult {
-        if (!mapLaunchLock.tryLock()) return NavigationSwitchResult.BUSY
-        try {
-            val updated = synchronized(navigationStateLock) {
-                val old = launchSession
-                val context = appContextRef ?: return NavigationSwitchResult.NOT_CONNECTED
-                if (old.generation != expectedSession || appDisplayId < 0) return NavigationSwitchResult.NOT_CONNECTED
-                if (old.phoneNavigation.enabled == enabled) return NavigationSwitchResult.UNCHANGED
-                if (!AppOrientationCompat.updatePhoneNavigation(enabled)) return NavigationSwitchResult.BUSY
-                // 保留连接代次和巡航尝试记录，旧地图/页面闭包凭对象身份失效。
-                LaunchSession(old.generation, enabled, old.navigationRevision + 1, old.cruisePolicy, old.controllerShortcuts).also {
-                    launchSession = it
-                    presentationRequests.incrementAndGet()
-                    PhoneNavigationPrefs.setEnabled(context, enabled)
-                }
-            }
-            // 生命周期清理可随时到来；迟到更新不能重新显示旧地图。
-            synchronized(navigationStateLock) {
-                if (launchSession !== updated) return NavigationSwitchResult.NOT_CONNECTED
-                LetterboxHintController.clear()
-                ScreenDimmer.setPhoneNavigationMode(enabled)
-                if (enabled) {
-                    val wasFullscreen = mapFullscreen
-                    mapFullscreen = false
-                    composer?.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
-                    if (wasFullscreen) showDashboard()
-                } else if (dashboardMode) {
-                    syncDashboard(true)
-                }
-                notifyDashboard()
-                notifyMapLayout()
-                runCatching {
-                    logSink?.invoke("MAP: 实时切换手机导航=$enabled revision=${updated.navigationRevision}；保留显示/音视频，地图横屏设置本连接延后")
-                }
-            }
-            return NavigationSwitchResult.UPDATED
-        } finally {
-            mapLaunchLock.unlock()
-        }
-    }
 
     fun sessionGeneration(): Long = launchSession.generation
 
@@ -134,17 +90,7 @@ object VirtualLauncher {
 
     fun canRouteMapTouch(generation: Long = sessionGeneration()): Boolean {
         val session = launchSession
-        return session.generation == generation && session.phoneNavigation.allowsMapAction(sessionGeneration(), navigationRevision()) &&
-            (mapFullscreen || dashboardMode)
-    }
-
-    private fun showPhoneNavigationNotice(session: LaunchSession) {
-        if (launchSession !== session || !session.phoneNavigation.enabled) return
-        val presentation = presentationRequests.incrementAndGet()
-        logSink?.invoke("MAP: 手机导航模式保持地图在手机，车机不启动地图或巡航")
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (launchSession === session && presentationRequests.get() == presentation && appDisplayId >= 0) showDashboard()
-        }
+        return session.generation == generation && session.carMapAvailable && (mapFullscreen || dashboardMode)
     }
 
     /** 自有播放页只允许停留在本次车机会话的应用屏，断开后的迟到启动自行退出。 */
@@ -443,27 +389,28 @@ object VirtualLauncher {
         mapLayoutListeners.forEach { runCatching { it(mapFullscreen) } }
     }
 
-    /** 地图应用白名单（优先序：车机版高德 → 手机高德 → 百度 → 腾讯）。 */
-    val MAP_PACKAGES_PRIORITY =
-        listOf(
-            "com.autonavi.amapauto",
-            "com.autonavi.minimap",
-            "com.baidu.BaiduMap",
-            "com.tencent.map",
-        )
+    fun isMapPackage(packageName: String): Boolean = packageName == BaiduCruise.PACKAGE
 
-    fun isMapPackage(packageName: String): Boolean = PhoneNavigationPrefs.isMapPackage(packageName)
-
-    /**
-     * 已安装的默认地图（用户显式设置优先——DefaultMapPrefs；否则按优先序取
-     * 第一个已安装者；null = 无任何地图应用）。
-     *
-     * ⚠️ 本函数**只是**对 [DefaultMapPrefs.resolve] 的转调，而后者不得反过来调用
-     * 本函数（会无限递归 → StackOverflowError）。优先序扫描已在 resolve 内部就地
-     * 实现，正确性由它负责；此处保留仅为对外 API 语义（VirtualLauncher 是调用方
-     * 的主要入口）。2026-10-18 定谳。
-     */
     fun defaultMapComponent(context: Context): ComponentName? = DefaultMapPrefs.resolve(context)
+
+    /** Reconcile package changes with both the touch router and the drawn map tile. */
+    fun refreshCarMapAvailability(context: Context): Boolean {
+        val session = launchSession
+        val available = defaultMapComponent(context) != null
+        synchronized(navigationStateLock) {
+            if (launchSession !== session || appContextRef == null || session.carMapAvailable == available) return available
+            session.carMapAvailable = available
+            session.navigationRevision++
+            if (dashboardMode || mapFullscreen) presentationRequests.incrementAndGet()
+        }
+        if (launchSession !== session || session.carMapAvailable != available) return available
+        if (!available && mapFullscreen) showDashboard()
+        else {
+            if (dashboardMode) syncDashboard(true)
+            notifyDashboard()
+        }
+        return available
+    }
 
     /**
      * 桌面所在屏相对视频流的渲染倍率（原生屏=1，超采样屏=hiScale）。
@@ -494,11 +441,106 @@ object VirtualLauncher {
     /** 当前活动应用屏的坐标倍率（超采样屏=hiScale，原生屏=1）。 */
     fun activeAppScale(): Float = if (composer?.isActiveAppHi() == true && appHiDisplayId >= 0) hiScale else 1f
 
+    private val appRailLock = Any()
+    private val appRail = ProjectedAppRailState()
+    private data class DrawnRailOwner(val generation: Long, val display: Int)
+    @Volatile private var railOwner: DrawnRailOwner? = null
+    private var nativeAppDpi = 0
+    private var supersampledAppDpi = 0
+    internal val appRailFrame: AppRailFrame? get() = composer?.drawnAppRail
+
+    internal fun appRailFrameCurrent(generation: Long, display: Int): Boolean {
+        val owner = railOwner ?: return false
+        return owner.generation == generation && owner.display == display
+    }
+
+    internal fun appRailFrameCurrent(generation: Long): Boolean = synchronized(appRailLock) {
+        appContextRef != null && appRail.scene != null && appRail.generation == generation
+    }
+
+    internal fun isAppRailCurrent(frame: AppRailFrame): Boolean = synchronized(appRailLock) {
+        appContextRef != null && appRail.generation == frame.sceneGeneration && appRail.scene?.display == frame.displayId &&
+            presentationRevision() == frame.revision
+    }
+
+    internal fun toggleAppRail(frame: AppRailFrame): Boolean = synchronized(appRailLock) {
+        isAppRailCurrent(frame) && toggleAppRail()
+    }
+
+    fun toggleAppRail(): Boolean = synchronized(appRailLock) { setAppRailExpanded(!appRail.expanded) }
+
+    @JvmOverloads
+    fun setAppRailExpanded(expanded: Boolean, expectedGeneration: Long? = null): Boolean = synchronized(appRailLock) {
+        if (expectedGeneration != null && expectedGeneration != appRail.generation) return false
+        val renderer = composer ?: return false
+        val scene = appRail.scene ?: return false
+        if (appContextRef == null || scene.display <= 0) return false
+        appRail.expanded = expanded
+        renderer.setAppRail(true, expanded, railBufferIsFull(scene.display), appRail.generation)
+        true
+    }
+
+    private fun railBufferIsFull(display: Int): Boolean {
+        val scale = if (display == appHiDisplayId) hiScale else 1f
+        return hintDisplaySize(display) == ((streamWidthPx * scale).toInt() to (streamHeightPx * scale).toInt())
+    }
+
+    private fun selectAppRail(display: Int = -1, key: String? = null): Unit = synchronized(appRailLock) {
+        val renderer = composer ?: return
+        if (appContextRef == null) return
+        val next = if (display > 0 && key != null) ProjectedAppRailState.Scene(display, key) else null
+        val previous = appRail.scene
+        if (!appRail.select(next)) return
+        railOwner = next?.let { DrawnRailOwner(appRail.generation, it.display) }
+        if (previous != null && previous.display != next?.display) {
+            if (previous.display == mapDisplayId) resizeMapDisplay(false)
+            else resizeAppDisplay(previous.display, false)
+        }
+        if (next != null) {
+            if (display == mapDisplayId) resizeMapDisplay(true) else resizeAppDisplay(display, true)
+        }
+        renderer.setAppRail(next != null, appRail.expanded, next != null && railBufferIsFull(display), appRail.generation)
+    }
+
+    /** Keep the application's density while supplying a larger real render target. */
+    private fun resizeAppDisplay(display: Int, fullscreen: Boolean) {
+        val hi = display == appHiDisplayId
+        if (display <= 0 || (!hi && display != appDisplayId)) return
+        val scale = if (hi) hiScale else 1f
+        val w = ((if (fullscreen) streamWidthPx else appAreaWidth) * scale).toInt()
+        val h = ((if (fullscreen) streamHeightPx else appAreaHeight) * scale).toInt()
+        if (w <= 0 || h <= 0 || hintDisplaySize(display) == (w to h)) return
+        val dpi = if (hi) supersampledAppDpi else nativeAppDpi
+        val local = if (hi) appHiDisplay else appDisplay
+        if (!resizeVirtualDisplay(display, local, w, h, dpi)) return
+        if (hi) {
+            appHiDisplayW = w
+            appHiDisplayH = h
+        } else {
+            appDisplayW = w
+            appDisplayH = h
+        }
+        composer?.resizeAppInput(hi, w, h)
+        logSink?.invoke("LAUNCHER: 应用屏 resize display=$display → ${w}x$h")
+    }
+
+    private fun resizeVirtualDisplay(id: Int, local: VirtualDisplay?, w: Int, h: Int, dpi: Int): Boolean =
+        runCatching {
+            if (displaysViaService) CarInputClient.service?.resizeDisplay(id, w, h, dpi) == true
+            else if (local != null) { local.resize(w, h, dpi); true } else false
+        }.getOrDefault(false)
+
+    /** Touch and controller routing follow the rail in the last encoded frame. */
+    val dockOnRight: Boolean get() = composer?.drawnRightRail == true
+
     /** 应用区在输出画面中的矩形（顶部原点）——叠加卡片定位用。 */
     fun appAreaRect(): RectF? {
         if (streamWidthPx <= 0 || streamHeightPx <= 0) return null
+        appRailFrame?.let { return RectF(it.contentLeft.toFloat(), it.contentTop.toFloat(), it.contentRight.toFloat(), it.contentBottom.toFloat()) }
         return if (dockAtBottom) {
             RectF(0f, 0f, streamWidthPx.toFloat(), appHeightPx.toFloat())
+        } else if (dockOnRight) {
+            RectF(0f, 0f, appAreaWidth.toFloat(), streamHeightPx.toFloat())
         } else {
             RectF(dockWidthPx.toFloat(), 0f, streamWidthPx.toFloat(), streamHeightPx.toFloat())
         }
@@ -524,6 +566,14 @@ object VirtualLauncher {
     /** 会话上下文（letterbox 重启后复探要用；未 attach 时为 null）。 */
     fun appContext(): Context? = appContextRef
 
+    /** Mirrors the palette actually displayed by the dock, including vehicle night mode. */
+    @Volatile internal var appRailDay = false
+        private set
+
+    internal fun updateAppRailDay(display: Int, day: Boolean) {
+        if (display > 0 && display == dockDisplayId) appRailDay = day
+    }
+
     /**
      * 挂载：建 GL 合成器 → 就绪回调里建两块虚拟屏 → 拉起 Dock/Grid。
      * [encoderSurface] 为编码器输入 Surface；返回是否全部成功。
@@ -539,14 +589,14 @@ object VirtualLauncher {
         independentControllerFocus: Boolean = false,
     ): Boolean {
         detach()
-        val session = LaunchSession(launchGenerations.incrementAndGet(), PhoneNavigationPrefs.enabled(context),
+        DefaultMapPrefs.clearLegacySelection(context)
+        val session = LaunchSession(launchGenerations.incrementAndGet(), defaultMapComponent(context) != null,
             controllerShortcuts = independentControllerFocus)
         synchronized(navigationStateLock) {
             launchSession = session
-            AppOrientationCompat.beginSession(session.phoneNavigation.enabled)
+            AppOrientationCompat.beginSession()
         }
-        ScreenDimmer.setPhoneNavigationMode(session.phoneNavigation.enabled)
-        log("MAP: 本次手机导航模式=${session.phoneNavigation.enabled}")
+        log("MAP: 百度地图汽车版可用=${session.carMapAvailable}")
         mapDensityDpi = MapDisplayPrefs.densityDpi(context)
         appliedMapDpi = mapDensityDpi
         wideBaiduCruise = MapDisplayPrefs.wideCruise(context)
@@ -663,7 +713,9 @@ object VirtualLauncher {
         val useTrusted = svc != null
         log("LAUNCHER: 虚拟屏模式=${if (useTrusted) "受信屏(shell)" else "应用屏(回退)"}")
 
-        val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom)
+        nativeAppDpi = appNativeDensity
+        supersampledAppDpi = appHiDensity
+        val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom, appNativeDensity)
         composer.targetFps =
             DisplayPrefs
                 .fps(context)
@@ -805,6 +857,8 @@ object VirtualLauncher {
             } else {
                 // 回退：应用侧 PUBLIC 屏（应用内跳转任务会逃逸到手机主屏，尽量可用的降级形态）
                 val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                // Keep all car activities off the handset when the public projection displays are removed.
+                val displayFlags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or CAR_DISPLAY_CONTENT_FLAGS
                 dockDisplay =
                     dm.createVirtualDisplay(
                         "CarPlayDock",
@@ -812,8 +866,7 @@ object VirtualLauncher {
                         dockHeightPx,
                         dockDensityDpi,
                         dockSurface,
-                        DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                            DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                        displayFlags,
                         null,
                         null,
                     )
@@ -824,8 +877,7 @@ object VirtualLauncher {
                         appHeightPx,
                         appNativeDensity,
                         appSurface,
-                        DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                            DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                        displayFlags,
                         null,
                         null,
                     )
@@ -837,8 +889,7 @@ object VirtualLauncher {
                             appHiHeight,
                             appHiDensity,
                             appHiSurface,
-                            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                            displayFlags,
                             null,
                             null,
                         )
@@ -858,8 +909,7 @@ object VirtualLauncher {
                             appHeightPx,
                             mapDensityDpi,
                             mapSurface,
-                            DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
-                                DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY,
+                            displayFlags,
                             null,
                             null,
                         )
@@ -955,13 +1005,12 @@ object VirtualLauncher {
             shortcutGate.reset()
             settingsShortcut = null
             mediaShortcut = null
-            destinationInput = null
             AppOrientationCompat.endSession()
             // 先使排队操作失效，并让实时切换立即看到连接结束。
             launchSession = LaunchSession(launchGenerations.incrementAndGet())
             appContextRef = null
         }
-        ScreenDimmer.setPhoneNavigationMode(false)
+        synchronized(appRailLock) { appRail.select(null); railOwner = null }
         io.github.shaonialife.cardeck.media.OnlineLyrics.onProjectionEnded()
         LauncherActivityTracker.finishCaptured()
         ScreenDimmer
@@ -1066,6 +1115,8 @@ object VirtualLauncher {
         val presentation = presentationRequests.get()
         val grid = if (gridDisplayId >= 0) gridDisplayId else appDisplayId
         val pkg = appContextRef?.packageName ?: return
+        if (!allowed()) return
+        selectAppRail()
         Bg.run("go-grid") {
             if (!allowed() || launchSession !== session || presentationRequests.get() != presentation ||
                 (grid != gridDisplayId && grid != appDisplayId)
@@ -1099,9 +1150,7 @@ object VirtualLauncher {
         syncDashboard(true)
         goGrid()
         composer?.requestActiveApp(appHiDisplayId >= 0 && gridDisplayId == appHiDisplayId)
-        logSink?.invoke(
-            if (isPhoneNavigationActive()) "LAUNCHER: 仪表盘模式（手机导航提示 + 音乐卡）" else "LAUNCHER: 仪表盘模式（地图 tile + 音乐卡）",
-        )
+        logSink?.invoke("LAUNCHER: 仪表盘模式（地图 tile + 音乐卡）")
     }
 
     /**
@@ -1117,12 +1166,13 @@ object VirtualLauncher {
         val presentation = presentationRequests.get()
         dashboardMode = dashboard
         if (leaveFullscreen) mapFullscreen = false
+        if (dashboard) selectAppRail()
         if (changed) notifyDashboard()
         if (leaveFullscreen) {
             notifyMapLayout()
             LetterboxHintController.clear()
         }
-        if (!dashboard || session.phoneNavigation.enabled) {
+        if (!dashboard || !session.carMapAvailable) {
             composer?.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
             return
         }
@@ -1150,7 +1200,7 @@ object VirtualLauncher {
     /** 滑动预览：仅切 tile 可见（不动 dashboardMode/监听），落定后由 syncDashboard 对账。 */
     fun showMapTile() {
         composer?.setTileLayout(
-            if (isPhoneNavigationActive()) DualDisplayComposer.TileLayout.HIDDEN else DualDisplayComposer.TileLayout.SPLIT,
+            if (launchSession.carMapAvailable) DualDisplayComposer.TileLayout.SPLIT else DualDisplayComposer.TileLayout.HIDDEN,
         )
     }
 
@@ -1182,13 +1232,18 @@ object VirtualLauncher {
     fun setMapFullscreen(fullscreen: Boolean) = setMapFullscreen(fullscreen, invalidateRequest = true)
 
     private fun setMapFullscreen(fullscreen: Boolean, invalidateRequest: Boolean) {
-        if (isPhoneNavigationActive()) {
-            mapFullscreen = false
-            composer?.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
-            if (fullscreen) showPhoneNavigationNotice(launchSession)
+        if (fullscreen && !launchSession.carMapAvailable) return
+        if (mapDisplayId <= 0) return
+        if (fullscreen) {
+            selectAppRail(mapDisplayId, BaiduCruise.PACKAGE)
+        } else if (mapFullscreen) selectAppRail()
+        if (mapFullscreen == fullscreen) {
+            // Switching between full-screen map tasks does not otherwise cause a resize.
+            if (fullscreen && appliedMapDpi != launchSession.baiduKeyboardLayout.density(mapDensityDpi, presentationRevision())) {
+                resizeMapDisplay(true)
+            }
             return
         }
-        if (mapDisplayId < 0 || mapFullscreen == fullscreen) return
         val session = launchSession
         val presentation = if (invalidateRequest) presentationRequests.incrementAndGet() else presentationRequests.get()
         mapFullscreen = fullscreen
@@ -1198,7 +1253,7 @@ object VirtualLauncher {
             if (fullscreen) {
                 DualDisplayComposer.TileLayout.FULLSCREEN
             } else {
-                DualDisplayComposer.TileLayout.SPLIT
+                if (session.carMapAvailable) DualDisplayComposer.TileLayout.SPLIT else DualDisplayComposer.TileLayout.HIDDEN
             },
         )
         notifyMapLayout()
@@ -1327,29 +1382,18 @@ object VirtualLauncher {
      * 应用的配置变更/重布局，能免则免）。Shizuku 未绑定或调用失败时保持现尺寸，
      * 合成器整幅映射依旧成立（只是地图 UI 密度与可视区域暂不匹配）。
      */
-    private fun resizeMapDisplay(fullscreen: Boolean) {
+    private fun resizeMapDisplay(fullscreen: Boolean): Unit = synchronized(appRailLock) {
         val session = launchSession
         val id = mapDisplayId
         if (id < 0) return
-        val w = if (fullscreen) appAreaWidth else mapTileWidth
-        val h = if (fullscreen) appAreaHeight else mapTileHeight
-        val dpi = if (!fullscreen && !dockAtBottom && wideBaiduCruise && session.baiduCruiseTile &&
-            !session.phoneNavigation.enabled
-        ) MapUiScale.baiduTileDensity(mapDensityDpi, w, h) else mapDensityDpi
+        val w = if (fullscreen) streamWidthPx else mapTileWidth
+        val h = if (fullscreen) streamHeightPx else mapTileHeight
+        val dpi = if (!fullscreen && !dockAtBottom && wideBaiduCruise && session.baiduAutoTile
+        ) MapUiScale.baiduTileDensity(mapDensityDpi, w, h)
+        else if (fullscreen) session.baiduKeyboardLayout.density(mapDensityDpi, presentationRevision()) else mapDensityDpi
         if (w <= 0 || h <= 0 || (w == mapDisplayW && h == mapDisplayH && dpi == appliedMapDpi)) return
         runCatching {
-            val applied =
-                if (displaysViaService) {
-                    // 受信形态：shell 侧 resize
-                    val svc = CarInputClient.service ?: return@runCatching
-                    svc.resizeDisplay(id, w, h, dpi)
-                } else {
-                    // 回退形态：屏由本应用创建，直接用应用侧公开 API——shell 对
-                    // 他人创建的 display 没有 resize 权限（token 属主校验）
-                    val display = mapDisplay ?: return@runCatching
-                    display.resize(w, h, dpi)
-                    true
-                }
+            val applied = resizeVirtualDisplay(id, mapDisplay, w, h, dpi)
             if (applied && launchSession === session && mapDisplayId == id) {
                 mapDisplayW = w
                 mapDisplayH = h
@@ -1357,6 +1401,7 @@ object VirtualLauncher {
                 // 消费端 buffer 尺寸必须同步——否则新尺寸内容画进旧 buffer 左上区域
                 // （tile 内容偏左、宽度只剩比例值、右侧全黑）
                 composer?.resizeMapInput(w, h)
+                if (appRail.scene?.display == id && fullscreen) composer?.setAppRail(true, appRail.expanded, railBufferIsFull(id), appRail.generation)
                 logSink?.invoke(
                     "LAUNCHER: 地图屏 resize → ${w}x$h@${dpi}dpi（${if (fullscreen) "全屏" else "分屏"}，" +
                         "逻辑宽高 ${w * 160L / dpi}×${h * 160L / dpi}dp，首选 ${mapDensityDpi}dpi）",
@@ -1367,44 +1412,35 @@ object VirtualLauncher {
 
     /**
      * 地图应用启动到地图屏（全屏形态）：resize 地图屏 → 启动 → 合成器全屏布局。
-     * 地图应用之间的切换（高德 ↔ 百度）也在同一块屏上进行，旧任务被清（互斥）。
      */
     private fun launchMapOnMapDisplay(component: ComponentName, session: LaunchSession, presentation: Long): Boolean {
-        if (launchSession !== session || presentationRequests.get() != presentation ||
-            !session.phoneNavigation.allowsMapAction(sessionGeneration(), navigationRevision())
-        ) {
-            showPhoneNavigationNotice(session)
-            return false
-        }
+        if (component.packageName != BaiduCruise.PACKAGE || launchSession !== session ||
+            presentationRequests.get() != presentation || !session.carMapAvailable) return false
         val targetDisplay = mapDisplayId
         fun current(): Boolean = launchSession === session && mapDisplayId == targetDisplay &&
-            presentationRequests.get() == presentation &&
-            session.phoneNavigation.allowsMapAction(sessionGeneration(), navigationRevision())
+            presentationRequests.get() == presentation && session.carMapAvailable
         dashboardMode = false
         notifyDashboard()
         setMapFullscreen(true, invalidateRequest = false)
-        val target =
-            if (component.packageName == "com.autonavi.amapauto") {
-                "com.autonavi.amapauto/.MainMapActivity"
-            } else {
-                component.flattenToShortString()
-            }
-        // 同屏已有其他地图任务时清掉（白名单互斥；默认地图任务保留复用）
+        val target = component.flattenToShortString()
         val ctx = appContextRef
-        val defaultPkg = ctx?.let { defaultMapComponent(it)?.packageName }
-        if (component.packageName != defaultPkg) {
-            taskIdsOnDisplayPkg(component.packageName, targetDisplay).forEach { taskId ->
-                if (!current()) return false
-                Shell.exec("am stack remove $taskId", timeoutMs = 4000)
-            }
+        val baidu = currentBaiduPlacement(targetDisplay)
+        if (!current()) return false
+        if (baidu.activity != null) {
+            synchronized(runningApps) { runningApps.add(component) }
+            notifyRunningAppsChanged()
+            ctx?.let { ProjectionAppMobileData.note(it, session.generation, component.packageName) }
+            logSink?.invoke("MAP: 显示原百度任务 display=$targetDisplay task=${baidu.activity.taskId}")
+            return true
         }
         if (!current()) return false
         val result =
             Shell.exec(
-                "am start -n $target --display $targetDisplay -f 0x18000000",
+                "am start -n $target --display $targetDisplay" + (baidu.taskId?.let { " --task $it" } ?: " -f 0x18000000"),
                 timeoutMs = 8000,
             )
-        val ok = current() && result.ok && result.output.contains("Starting:", ignoreCase = true)
+        val ok = current() && result.ok && result.output.contains("Starting:", ignoreCase = true) &&
+            !result.output.contains("Error:", ignoreCase = true)
         logSink?.invoke(
             "LAUNCH(${component.packageName}): → 地图屏全屏 ok=$ok out=${result.output.take(80)}",
         )
@@ -1418,12 +1454,6 @@ object VirtualLauncher {
         }
         return ok
     }
-
-    /** 指定屏上指定包的任务 ID 列表（清屏用）。 */
-    private fun taskIdsOnDisplayPkg(
-        pkg: String,
-        displayId: Int,
-    ): List<String> = tasksOf(taskIdsByDisplayPkg(), pkg, displayId)
 
     /**
      * 一次 `dumpsys activity activities` 解析出「displayId → 包 → 任务 ID 列表」。
@@ -1458,7 +1488,7 @@ object VirtualLauncher {
      */
     private fun ensureMapTask(session: LaunchSession, presentation: Long) {
         mapLaunchLock.withLock {
-            if (!session.phoneNavigation.allowsMapAction(sessionGeneration(), navigationRevision())) return
+            if (launchSession !== session || !session.carMapAvailable) return
             val targetDisplay = mapDisplayId
             if (targetDisplay < 0) {
                 // 诊断（2026-10-18「重装后地图卡不渲染」）：此前静默 return，无法区分
@@ -1473,56 +1503,29 @@ object VirtualLauncher {
                 }
             val component =
                 defaultMapComponent(ctx) ?: run {
-                    logSink?.invoke("LAUNCHER: 未找到任何地图应用（白名单内）——地图 tile 空")
+                    refreshCarMapAvailability(ctx)
+                    logSink?.invoke("LAUNCHER: 请在手机安装百度地图汽车版")
                     return
                 }
             fun current(): Boolean = launchSession === session && appContextRef === ctx &&
-                session.phoneNavigation.allowsMapAction(sessionGeneration(), navigationRevision()) &&
+                session.carMapAvailable &&
                 mapDisplayId == targetDisplay && dashboardMode && presentationRequests.get() == presentation &&
                 defaultMapComponent(ctx) == component
             if (!current()) return
-            val baiduAutomatic = component.packageName == BaiduCruise.PACKAGE && BaiduCruise.automaticEnabled(ctx)
-            session.baiduCruiseTile = component.packageName == BaiduCruise.PACKAGE && (baiduAutomatic || session.baiduCruiseTile)
-            // Apply the split display configuration before requesting a Baidu page so that a
-            // density-triggered relayout cannot replace the freshly opened page.
+            session.baiduAutoTile = true
             resizeMapDisplay(fullscreen = false)
             if (!current()) return
-            val baiduDump = if (component.packageName == BaiduCruise.PACKAGE) {
-                Shell.exec("dumpsys -t 2 activity activities", timeoutMs = 3000)
-            } else null
+            val placement = currentBaiduPlacement(targetDisplay)
             if (!current()) return
-            if (baiduDump?.ok == true) {
-                val visible = baiduOnMapDisplay(targetDisplay, baiduDump.output).activity
-                if (visible != null) {
-                    ProjectionAppMobileData.note(ctx, session.generation, component.packageName)
-                    logSink?.invoke("MAP: 首页复用前台地图 display=$targetDisplay task=${visible.taskId}")
-                    return
-                }
-            }
-            if (baiduAutomatic && baiduDump != null) {
-                val evidence = baiduCruiseTaskEvidence(baiduDump.ok, baiduDump.output)
-                val claimed = session.cruisePolicy.tryClaimAutoStart(
-                    enabled = BaiduCruise.automaticEnabled(ctx),
-                    defaultPackage = defaultMapComponent(ctx)?.packageName,
-                    taskQuerySucceeded = evidence.querySucceeded,
-                    existingTaskCount = evidence.existingTaskCount,
-                )
-                if (claimed) {
-                    if (sendBaiduPage(ctx, targetDisplay, BaiduMapPage.CRUISE, ::current)) return
-                    logSink?.invoke("MAP: 自动巡航入口未启动，本次恢复普通地图")
-                } else {
-                    logSink?.invoke("MAP: 保留现有地图启动 queryOk=${evidence.querySucceeded} existing=${evidence.existingTaskCount > 0}")
-                }
+            placement.activity?.let { visible ->
+                ProjectionAppMobileData.note(ctx, session.generation, component.packageName)
+                logSink?.invoke("MAP: 首页复用前台地图 display=$targetDisplay task=${visible.taskId}")
+                return
             }
             if (!current()) return
-            val target =
-                if (component.packageName == "com.autonavi.amapauto") {
-                    "com.autonavi.amapauto/.MainMapActivity"
-                } else {
-                    component.flattenToShortString()
-                }
-            // 不带 MULTIPLE_TASK：任务已在地图屏时等价于带回前台
-            val result = Shell.exec("am start -n $target --display $targetDisplay", timeoutMs = 8000)
+            val target = component.flattenToShortString()
+            val task = placement.taskId?.let { " --task $it" } ?: " -f 0x18000000"
+            val result = Shell.exec("am start -n $target --display $targetDisplay$task", timeoutMs = 8000)
             if (!current()) return
             val started = result.ok && result.output.contains("Starting:", true) && !result.output.contains("Error:", true)
             if (started) ProjectionAppMobileData.note(ctx, session.generation, component.packageName)
@@ -1534,92 +1537,11 @@ object VirtualLauncher {
         }
     }
 
-    /** 手动巡航是一次明确的界面操作；不清地图任务、不修改导航偏好或循环发送 URI。 */
-    fun startBaiduCruise(expectedSession: Long = sessionGeneration(), expectedNavigation: Long = navigationRevision()): Boolean {
-        val session = launchSession
-        if (session.generation != expectedSession || session.navigationRevision != expectedNavigation) return false
-        if (!session.phoneNavigation.allowsMapAction(sessionGeneration(), navigationRevision())) {
-            showPhoneNavigationNotice(session)
-            return false
-        }
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return false
-        val presentation = presentationRequests.incrementAndGet()
-        val ctx = appContextRef ?: return false
-        val targetDisplay = mapDisplayId
-        val targetComposer = composer ?: return false
-        if (targetDisplay < 0) return false
-        fun current(): Boolean = launchSession === session && appContextRef === ctx &&
-            session.phoneNavigation.allowsMapAction(sessionGeneration(), navigationRevision()) &&
-            mapDisplayId == targetDisplay && composer === targetComposer && presentationRequests.get() == presentation
-        return mapLaunchLock.withLock {
-            if (!current()) return@withLock false
-            val previous = session.baiduCruiseTile
-            session.baiduCruiseTile = true
-            if (dashboardMode && !mapFullscreen) resizeMapDisplay(fullscreen = false)
-            if (!current() || !sendBaiduPage(ctx, targetDisplay, BaiduMapPage.CRUISE, ::current)) {
-                session.baiduCruiseTile = previous
-                if (current() && dashboardMode && !mapFullscreen) resizeMapDisplay(fullscreen = false)
-                return@withLock false
-            }
-            if (!current()) return@withLock false
-            // 首页按钮继续留在地图+媒体布局；设置页等入口则显示全屏地图。
-            if (!dashboardMode) setMapFullscreen(true)
-            logSink?.invoke("MAP: 手动巡航请求已发送，实际界面由百度地图处理")
-            true
-        }
-    }
-
     private fun shellArgument(value: String): String = "'" + value.replace("'", "'\\''") + "'"
-
-    private fun sendBaiduPage(
-        context: Context, displayId: Int, page: BaiduMapPage, current: () -> Boolean, mapTaskId: Int? = null,
-        uri: String = page.uri,
-    ): Boolean {
-        val generation = sessionGeneration()
-        if (displayId <= 0 || isPhoneNavigationActive() || !current()) return false
-        AppOrientationCompat.awaitPending()
-        if (!current()) return false
-        val receiver = BaiduCruise.resolveComponent(context, uri) ?: run {
-            logSink?.invoke("MAP: 已安装客户端未提供${page.label}入口")
-            return false
-        }
-        // Search can be opened over another default map. Reuse Baidu's in-car task;
-        // when it only has a phone task, request a separate task on the map display.
-        val flags = when {
-            page == BaiduMapPage.CRUISE -> ""
-            mapTaskId != null -> " --task $mapTaskId"
-            else -> " -f 0x18000000"
-        }
-        if (!current()) return false
-        val result = Shell.exec(
-            "am start -a android.intent.action.VIEW -d ${shellArgument(uri)} " +
-                "-n ${shellArgument(receiver.flattenToString())} --display $displayId$flags 2>&1",
-            timeoutMs = 8000,
-        )
-        val ok = current() && result.ok && result.output.contains("Starting:", ignoreCase = true) &&
-            !result.output.contains("Error:", ignoreCase = true) && !result.output.contains("Exception", ignoreCase = true)
-        logSink?.invoke("MAP: ${page.label}入口请求 display=$displayId task=${mapTaskId ?: "new-or-default"} accepted=$ok")
-        if (ok) ProjectionAppMobileData.note(context, generation, receiver.packageName)
-        return ok
-    }
 
     private fun currentBaiduPlacement(display: Int): BaiduMapPlacement {
         val dump = Shell.exec("dumpsys -t 2 activity activities", timeoutMs = 3000)
         return if (dump.ok) baiduOnMapDisplay(display, dump.output) else BaiduMapPlacement()
-    }
-
-    private fun baiduSearchPageVisible(activity: BaiduMapActivity): Boolean {
-        // The same component may also exist on the phone. Filter by the task just observed
-        // on the car display. Only task numbers, class names and lifecycle flags leave shell.
-        val result = Shell.exec(
-            "dumpsys -t 2 activity ${shellArgument(activity.component)} | " +
-                "sed -nE 's/^[[:space:]]*TASK .* id=([0-9]+)([[:space:]].*|$)/TASK \\1/p; " +
-                "s/^[[:space:]]*([[:alnum:]_.$]+)\\{.*/\\1{/p; " +
-                "s/^[[:space:]]*(mState=[0-9]+|mAdded=[a-z]+ mRemoving=[a-z]+|" +
-                "mHidden=[a-z]+ mDetached=[a-z]+)([[:space:]].*|$)/\\1/p'",
-            timeoutMs = 3000,
-        )
-        return result.ok && hasActiveBaiduSearchPage(result.output, activity.taskId)
     }
 
     private fun shortcutCurrent(request: ShortcutRequest): Boolean =
@@ -1629,8 +1551,8 @@ object VirtualLauncher {
     /** Called only for a recognized user action. The caller owns the current receiver's screen grant. */
     fun submitShortcut(shortcut: CarShortcut, live: () -> Boolean): Boolean = enqueueShortcut(shortcut, true, live = live)
 
-    /** CarDeck dashboard's touch entry also works on receivers that expose no NAV key. */
-    internal fun submitDashboardDestination(destination: BaiduDestination, live: () -> Boolean): Boolean {
+    /** A dashboard shortcut always names one of Baidu's saved commute destinations. */
+    internal fun submitDashboardCommute(place: CommutePlace, live: () -> Boolean): Boolean {
         val client = io.github.shaonialife.cardeck.SessionController.currentClient ?: run {
             logSink?.invoke("SHORTCUT: NAV dashboard=no-client")
             return false
@@ -1641,24 +1563,22 @@ object VirtualLauncher {
             logSink?.invoke("SHORTCUT: NAV dashboard=screen-unavailable")
             return false
         }
-        return enqueueShortcut(CarShortcut.NAV, false, destination) {
+        return enqueueShortcut(CarShortcut.NAV, false, place) {
             live() && !client.cancelled && io.github.shaonialife.cardeck.SessionController.currentClient === client &&
                 (!guarded || client.controllerInputRevision == revision)
         }.also { logSink?.invoke("SHORTCUT: NAV dashboardQueued=$it") }
     }
 
     private fun enqueueShortcut(
-        shortcut: CarShortcut, hardware: Boolean, destination: BaiduDestination = BaiduDestination.NEW, live: () -> Boolean,
+        shortcut: CarShortcut, hardware: Boolean, place: CommutePlace? = null, live: () -> Boolean,
     ): Boolean {
         if (!live()) return false
         val request = synchronized(navigationStateLock) {
             val session = launchSession
             if ((hardware && !session.controllerShortcuts) || appContextRef == null || composer == null ||
                 gridDisplayId <= 0 || appDisplayId <= 0 || !live()) return false
-            val ticket = shortcutGate.claim(shortcut, session.generation, android.os.SystemClock.elapsedRealtime()) ?: return false
-            // Phone navigation only shows a notice; leave an ordinary in-flight app launch alone.
-            val revision = if ((shortcut == CarShortcut.MAP || shortcut == CarShortcut.NAV) && session.phoneNavigation.enabled) presentationRequests.get()
-                else presentationRequests.incrementAndGet()
+            val ticket = shortcutGate.claim(shortcut, session.generation, android.os.SystemClock.elapsedRealtime(), place) ?: return false
+            val revision = presentationRequests.incrementAndGet()
             ShortcutRequest(ticket, session, revision, live).also {
                 if (shortcut == CarShortcut.MEDIA) mediaShortcut = it
                 if (shortcut == CarShortcut.OPTION) settingsShortcut = it
@@ -1681,15 +1601,8 @@ object VirtualLauncher {
                             launchCarMedia(target, request.session, request.presentation) { shortcutCurrent(request) }
                         } else showShortcutNotice(request, "未找到可用的音乐应用")
                     }
-                    CarShortcut.MAP -> {
-                        if (request.session.phoneNavigation.enabled) showShortcutNotice(request, "手机导航中")
-                        else openShortcutMap(ctx, request)
-                    }
+                    CarShortcut.MAP, CarShortcut.NAV -> openShortcutMap(ctx, request)
                     CarShortcut.OPTION -> openShortcutSettings(ctx, request)
-                    CarShortcut.NAV -> {
-                        if (request.session.phoneNavigation.enabled) showShortcutNotice(request, "手机导航中")
-                        else openBaiduDestination(ctx, request, destination)
-                    }
                 }
             } finally {
                 shortcutGate.finished(request.ticket)
@@ -1701,23 +1614,29 @@ object VirtualLauncher {
     private fun openShortcutMap(ctx: Context, request: ShortcutRequest) {
         val component = defaultMapComponent(ctx)
         if (component == null || mapDisplayId <= 0) {
-            showShortcutNotice(request, "未找到可用的车机地图")
+            showShortcutNotice(request, "请在手机安装百度地图汽车版")
             return
         }
+        val place = request.ticket.place
         AppOrientationCompat.awaitPending()
+        var replacingRoute = false
         mapLaunchLock.withLock {
             val display = mapDisplayId
             fun current(): Boolean = shortcutCurrent(request) && display > 0 && display == mapDisplayId &&
-                !request.session.phoneNavigation.enabled && defaultMapComponent(ctx) == component
+                request.session.carMapAvailable && defaultMapComponent(ctx) == component
             if (!current()) return
-            val existing = taskIdsOnDisplayPkg(component.packageName, display).isNotEmpty()
-            val name = if (component.packageName == "com.autonavi.amapauto") "com.autonavi.amapauto/.MainMapActivity"
-                else component.flattenToShortString()
+            val baidu = currentBaiduPlacement(display)
+            // The full-screen resize can briefly rebuild Baidu's guidance panel. Inspect the live tile first.
+            if (place != null && baidu.activity != null) {
+                replacingRoute = readCommuteGuidance(baidu.activity, display) == CommuteGuidance.ROUTE
+            }
+            val existing = baidu.taskId != null
             if (!current()) return
-            val result = Shell.exec("am start -n ${shellArgument(name)} --display $display" +
-                if (existing) "" else " -f 0x18000000", 8_000)
+            val result = if (baidu.activity != null) null else Shell.exec(
+                "am start -n ${shellArgument(component.flattenToShortString())} --display $display" +
+                    (baidu.taskId?.let { " --task $it" } ?: " -f 0x18000000"), 8_000)
             if (!current()) return
-            if (!result.ok || !result.output.contains("Starting:", true) || result.output.contains("Error:", true)) {
+            if (result != null && (!result.ok || !result.output.contains("Starting:", true) || result.output.contains("Error:", true))) {
                 showShortcutNotice(request, "车机地图未打开")
                 return
             }
@@ -1729,128 +1648,115 @@ object VirtualLauncher {
             logSink?.invoke("SHORTCUT: MAP display=$display existing=$existing")
             ProjectionAppMobileData.note(ctx, request.session.generation, component.packageName)
         }
+        if (place != null && shortcutCurrent(request)) openCommute(request, place, replacingRoute)
     }
 
-    private fun openBaiduDestination(ctx: Context, request: ShortcutRequest, destination: BaiduDestination) {
-        mapLaunchLock.withLock {
-            val display = mapDisplayId
-            val fromDashboard = dashboardMode && !mapFullscreen
-            fun current() = shortcutCurrent(request) && display > 0 && display == mapDisplayId && !isPhoneNavigationActive()
-            fun launchFailed(message: String) {
-                if (!current()) return
-                showShortcutNotice(request, message)
-                // An existing Baidu task was expanded before dispatch to preserve the page after resize.
-                if (fromDashboard && mapFullscreen && current()) showDashboard()
-            }
-            fun showMap() {
-                if (!current()) return
-                if (dashboardMode) {
-                    dashboardMode = false
-                    notifyDashboard()
+    private fun openCommute(request: ShortcutRequest, place: CommutePlace, activeBeforeResize: Boolean) {
+        val display = mapDisplayId
+        fun current() = display > 0 && display == mapDisplayId && mapFullscreen && shortcutCurrent(request) &&
+            request.session.carMapAvailable
+        if (!current()) return
+        val placement = currentBaiduPlacement(display)
+        if (!current()) return
+        val replacingRoute = activeBeforeResize || placement.activity?.let { readCommuteGuidance(it, display) } == CommuteGuidance.ROUTE
+        if (!current()) return
+        val task = placement.taskId?.let { " --task $it" }.orEmpty()
+        val result = Shell.exec(
+            "am start --display $display$task -a android.intent.action.VIEW -p ${BaiduCruise.PACKAGE} -d ${shellArgument(place.uri)}",
+            4_000,
+        )
+        if (!current()) return
+        val accepted = result.ok && result.output.contains("Starting:") && !result.output.contains("Error", ignoreCase = true) &&
+            !result.output.contains("Exception", ignoreCase = true)
+        logSink?.invoke("COMMUTE: ${place.name} requested=$accepted display=$display")
+        if (!accepted) {
+            showShortcutNotice(request, "未能打开百度汽车版，请回首页重试")
+            return
+        }
+        // Release the shortcut gate while monitoring. A later tap can retry or supersede this request.
+        Bg.run("commute-observe") {
+            val started = SystemClock.elapsedRealtime()
+            val deadline = started + if (replacingRoute) 52_000L else 16_000L
+            var waitingSince: Long? = null
+            var interval = 400L
+            var sawPanel = false
+            do {
+                SystemClock.sleep(interval)
+                if (!current()) return@run
+                val activity = currentBaiduPlacement(display).activity
+                val state = activity?.let { readCommuteGuidance(it, display) } ?: CommuteGuidance.NONE
+                if (!current()) return@run
+                val now = SystemClock.elapsedRealtime()
+                if (state != CommuteGuidance.NONE) sawPanel = true
+                if (replacingRoute && state == CommuteGuidance.CALCULATING) {
+                    val since = waitingSince ?: now
+                    waitingSince = since
+                    if (now - since >= 30_000L) {
+                        logSink?.invoke("COMMUTE: ${place.name} still-calculating display=$display")
+                        showShortcutNotice(request, "百度仍在算路，可退出当前导航后再点一次")
+                        return@run
+                    }
+                } else {
+                    if (state == CommuteGuidance.ROUTE && (!replacingRoute || waitingSince != null)) {
+                        // The external app does not report the identity of the active destination.
+                        logSink?.invoke("COMMUTE: ${place.name} turn-and-distance-visible display=$display")
+                        return@run
+                    }
+                    waitingSince = null
                 }
-                setMapFullscreen(true, invalidateRequest = false)
-            }
-            if (!current()) return
-            // In the dashboard Baidu is normally already running. Resize it before
-            // dispatching search so its configuration change cannot dismiss the new page.
-            val before = currentBaiduPlacement(display)
-            if (before.taskId != null) showMap()
-            if (!current()) return
-            var requested = sendBaiduPage(ctx, display, destination.page, ::current, before.taskId)
-            if (!requested) {
-                if (!current()) return
-                val task = currentBaiduPlacement(display).taskId
-                if (before.taskId != null && before.taskId != task) {
-                    requested = sendBaiduPage(ctx, display, destination.page, ::current, task)
-                }
-                if (!requested && destination != BaiduDestination.NEW) {
-                    launchFailed("未能打开「${destination.title}」，请在百度地图中选择常用地址")
-                    return
-                }
-                if (!requested && !sendBaiduPage(ctx, display, BaiduMapPage.HOME, ::current, task)) {
-                    launchFailed("百度地图未打开，请从车端应用页打开百度地图")
-                    return
-                }
-            }
-            // Reveal the requested car display even if this ROM is late reporting its
-            // foreground window. The old placement gate could leave a successful launch hidden.
-            showMap()
-            if (destination == BaiduDestination.NEW && current()) {
-                io.github.shaonialife.cardeck.SessionController.currentClient?.let { client ->
-                    destinationInput = DestinationInputTarget(display, request.session.generation,
-                        request.session.navigationRevision, request.presentation, client.controllerInputRevision)
-                }
-            }
-            // Baidu uses its own saved place or opens its address setup. It owns guidance
-            // and permission prompts. Never replay an accepted request or infer guidance from foreground placement.
-            var placement = before
-            val deadline = SystemClock.elapsedRealtime() + 4000
-            for (delay in listOf(300L, 650L, 1000L)) {
-                if (!current()) return
-                if (SystemClock.elapsedRealtime() + delay > deadline) break
-                SystemClock.sleep(delay)
-                if (!current()) return
-                placement = currentBaiduPlacement(display)
-                val activity = placement.activity ?: continue
-                if (destination != BaiduDestination.NEW) {
-                    if (current()) logSink?.invoke("SHORTCUT: NAV saved=${destination.name} display=$display task=${activity.taskId} mapForeground=true")
-                    return
-                }
-                if (!requested || baiduSearchPageVisible(activity)) {
-                    if (current()) logSink?.invoke("SHORTCUT: NAV display=$display task=${activity.taskId} poiSearch=" +
-                        if (requested) "visible" else "map-home-fallback")
-                    if (!requested) showShortcutNotice(request, "点百度地图搜索框输入新目的地")
-                    return
+                interval = (interval * 2).coerceAtMost(if (replacingRoute) 3_000L else 1_600L)
+            } while (SystemClock.elapsedRealtime() < deadline)
+            if (current()) {
+                logSink?.invoke("COMMUTE: ${place.name} route-unconfirmed display=$display")
+                if (!sawPanel && !replacingRoute) {
+                    val address = if (place == CommutePlace.HOME) "家" else "公司"
+                    showShortcutNotice(request, "如未开始导航，请先在百度汽车版设置${address}地址")
                 }
             }
-            if (!current()) return
-            if (destination != BaiduDestination.NEW) {
-                logSink?.invoke("SHORTCUT: NAV saved=${destination.name} display=$display mapForeground=unconfirmed")
-                showShortcutNotice(request, "请在车机百度地图中查看「${destination.title}」")
-                return
-            }
-            logSink?.invoke("SHORTCUT: NAV display=$display task=${placement.taskId} foreground=${placement.activity != null} poiSearch=unconfirmed")
-            showShortcutNotice(request, "点地图搜索框，也可在手机 CarDeck 输入地名")
         }
     }
 
-    /** An input dialog opened for an old car screen must not send its place to a later session. */
-    internal fun currentDestinationInput(): DestinationInputTarget? {
-        val target = destinationInput ?: return null
-        val client = io.github.shaonialife.cardeck.SessionController.currentClient ?: return null
-        return target.takeIf {
-            !client.cancelled && mapFullscreen && !isPhoneNavigationActive() && appContextRef != null &&
-                it.matches(mapDisplayId, sessionGeneration(), navigationRevision(), presentationRevision(), client.controllerInputRevision)
-        }
-    }
-
-    /** Called on a background thread after the user submits the phone keyboard. */
-    internal fun searchFromPhone(target: DestinationInputTarget, text: String): Boolean {
-        val uri = baiduKeywordSearchUri(text) ?: return false
-        val ctx = appContextRef ?: return false
-        fun current() = currentDestinationInput() === target
-        return mapLaunchLock.withLock {
-            if (!current()) return@withLock false
-            val foreground = currentBaiduPlacement(target.display).activity ?: return@withLock false
-            sendBaiduPage(ctx, target.display, BaiduMapPage.DESTINATION, ::current, foreground.taskId, uri)
-        }
+    private fun readCommuteGuidance(activity: BaiduMapActivity, display: Int): CommuteGuidance {
+        val dump = Shell.exec(
+            "dumpsys -t 1 activity ${shellArgument(activity.component)} | grep -E " +
+                shellArgument("^TASK | V[^ ]* .*app:id/($commuteViewIds)\\}"),
+            1_600,
+        )
+        return if (dump.ok) commuteGuidance(dump.output, display, activity.taskId) else CommuteGuidance.NONE
     }
 
     internal fun observeDestinationKeyboard(display: Int) {
-        val target = currentDestinationInput() ?: return
-        if (display != target.display || !target.claimKeyboardProbe(SystemClock.elapsedRealtime())) return
-        Bg.run("map-keyboard") {
-            SystemClock.sleep(550)
-            if (currentDestinationInput() !== target) return@run
-            // Filter on the device: never export IME text, suggestions, editor info or search terms.
-            val state = Shell.exec("dumpsys -t 2 input_method | grep -oE " +
-                "'mCurTokenDisplayId=-?[0-9]+|mInputShown=(true|false)' | head -n 2", 3000)
-            if (currentDestinationInput() === target) {
-                logSink?.invoke("MAP: 搜索键盘 target=$display " + state.output.lineSequence()
-                    .filter { it.matches(Regex("mCurTokenDisplayId=-?[0-9]+|mInputShown=(true|false)")) }
-                    .joinToString(" ").ifEmpty { "state=unknown" })
-            }
+        if (display == mapDisplayId && mapFullscreen) DockActivity.noteMapInteraction()
+    }
+
+    /** Called off the UI thread. Filter on-device to keep editor text and candidate addresses private. */
+    internal fun baiduHasCarKeyboard(display: Int): Boolean {
+        if (display <= 0 || display != mapDisplayId || !mapFullscreen || !canRouteMapTouch()) return false
+        val state = Shell.exec("dumpsys -t 1 input_method | grep -oE " +
+            "'mCurTokenDisplayId=-?[0-9]+|mInputShown=(true|false)' | head -n 2", 1500)
+        return state.ok && keyboardShownOnDisplay(state.output, display) && currentBaiduPlacement(display).activity != null
+    }
+
+    /** Only resize the projected map. Its normal full-screen size comes from the user's original preference. */
+    internal fun updateBaiduKeyboardLayout(display: Int, scene: Long, visible: Boolean): Boolean {
+        if (display <= 0 || display != mapDisplayId || scene != presentationRevision() || !mapFullscreen || !canRouteMapTouch()) return false
+        val layout = launchSession.baiduKeyboardLayout
+        if (layout.observe(scene, visible && mapDensityDpi > BaiduKeyboardLayout.SEARCH_DPI, SystemClock.elapsedRealtime())) {
+            resizeMapDisplay(true)
         }
+        return layout.active(scene)
+    }
+
+    /** Consume BACK when a car keyboard was verified, including if the service disconnects during dispatch. */
+    internal fun dismissBaiduKeyboard(display: Int, current: () -> Boolean): Boolean {
+        if (!current() || !baiduHasCarKeyboard(display)) return false
+        if (current() && display == mapDisplayId && canRouteMapTouch() && mapFullscreen) {
+            val sent = runCatching { CarInputClient.service?.sendNavigationKey(display, android.view.KeyEvent.KEYCODE_BACK, false) }
+                .getOrNull() == true
+            logSink?.invoke("MAP: 收起百度搜索键盘 display=$display sent=$sent")
+            DockActivity.noteMapInteraction()
+        }
+        return true
     }
 
     private fun openShortcutSettings(ctx: Context, request: ShortcutRequest) {
@@ -1880,6 +1786,7 @@ object VirtualLauncher {
         notifyDashboard()
         comp.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
         comp.requestActiveApp(gridDisplayId == appHiDisplayId)
+        selectAppRail(display, SettingsActivity::class.java.name)
         LetterboxHintController.clear()
         logSink?.invoke("SHORTCUT: OPTION display=$display")
         return true
@@ -1899,9 +1806,12 @@ object VirtualLauncher {
     }
 
     /** 车载播放页使用自有应用屏，第三方选歌仍走原 launchApp；不改变音频采集。 */
-    fun launchCarMedia(targetPackage: String? = null): Boolean {
+    fun launchCarMedia(targetPackage: String? = null, expectedSession: Long = sessionGeneration(),
+        expectedNavigation: Long = navigationRevision(), allowed: () -> Boolean = { true }): Boolean {
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return false
-        return launchCarMedia(targetPackage, launchSession, presentationRequests.incrementAndGet()) { true }
+        val session = launchSession
+        if (session.generation != expectedSession || session.navigationRevision != expectedNavigation || !allowed()) return false
+        return launchCarMedia(targetPackage, session, presentationRequests.incrementAndGet(), allowed)
     }
 
     private fun launchCarMedia(targetPackage: String?, session: LaunchSession, presentation: Long, allowed: () -> Boolean): Boolean {
@@ -1933,6 +1843,7 @@ object VirtualLauncher {
         notifyDashboard()
         targetComposer.setTileLayout(DualDisplayComposer.TileLayout.HIDDEN)
         targetComposer.requestActiveApp(false)
+        selectAppRail(targetDisplay, CarMediaActivity::class.java.name)
         LetterboxHintController.clear()
         logSink?.invoke("MEDIA: 车载播放页已打开 display=$targetDisplay target=$target")
         if (target in ShortcutMusic.known) lastShortcutMusic = target
@@ -1959,23 +1870,38 @@ object VirtualLauncher {
     fun launchApp(component: ComponentName, expectedSession: Long = sessionGeneration(), expectedNavigation: Long = navigationRevision()): Boolean {
         val session = launchSession
         if (session.generation != expectedSession || session.navigationRevision != expectedNavigation) return false
-        if (!session.phoneNavigation.allowsAppLaunch(component.packageName, sessionGeneration(), navigationRevision())) {
-            showPhoneNavigationNotice(session)
+        val ctx = appContextRef ?: return false
+        val info = try {
+            ctx.packageManager.getApplicationInfo(component.packageName, 0)
+        } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
             return false
         }
+        if (BaiduCruise.isExcludedCarMap(info.packageName, info.category)) return false
         val presentation = presentationRequests.incrementAndGet()
         if (appDisplayId < 0) return false
+        val car = if (component.packageName == NetEaseCarEdition.MOBILE) appContextRef?.let(NetEaseCarEdition::launcher) else null
+        if (car != null) {
+            logSink?.invoke("MEDIA: 从网易云图标打开已安装的网易云车机版")
+            if (launchResolvedApp(car, session, presentation)) return true
+        }
+        return launchResolvedApp(component, session, presentation)
+    }
+
+    private fun launchResolvedApp(component: ComponentName, session: LaunchSession, presentation: Long): Boolean {
+        if (launchSession !== session || presentationRequests.get() != presentation) return false
         // 会话建立时的「强制横屏」覆盖是异步写的，而 am compat 会立即杀掉目标应用：
         // 必须等队列排空再启动，否则应用刚起来就被覆盖写入杀掉（表现为闪退/落回手机屏）。
         // 执行器单线程 FIFO，正常情况下覆盖早已写完，这里立即返回。
         AppOrientationCompat.awaitPending()
         if (launchSession !== session || presentationRequests.get() != presentation ||
-            !session.phoneNavigation.allowsAppLaunch(component.packageName, sessionGeneration(), navigationRevision())
+            BaiduCruise.isExcludedCarMap(component.packageName)
         ) return false
         // 地图应用 → 地图屏全屏（任务常驻地图屏；从桌面 grid 点击同样去地图屏，
         // 与仪表盘共用同一任务，导航状态不丢）
-        if (isMapPackage(component.packageName) && mapDisplayId >= 0) {
-            return mapLaunchLock.withLock { launchMapOnMapDisplay(component, session, presentation) }
+        if (isMapPackage(component.packageName)) {
+            if (mapDisplayId <= 0) return false
+            val target = appContextRef?.let(::defaultMapComponent) ?: return false
+            return mapLaunchLock.withLock { launchMapOnMapDisplay(target, session, presentation) }
         }
         val ctx = appContextRef
         val wantHi =
@@ -1985,7 +1911,6 @@ object VirtualLauncher {
         val targetDisplay = if (wantHi) appHiDisplayId else appDisplayId
         fun current(): Boolean = launchSession === session &&
             presentationRequests.get() == presentation &&
-            session.phoneNavigation.allowsAppLaunch(component.packageName, sessionGeneration(), navigationRevision()) &&
             (targetDisplay == appDisplayId || targetDisplay == appHiDisplayId)
         // 任务查询共用一次 dumpsys 快照（此前 onTarget + 清理两块屏最多连跑 3 遍 4s 超时命令）
         val tasks = taskIdsByDisplayPkg()
@@ -2002,12 +1927,7 @@ object VirtualLauncher {
                 }
             }
         }
-        val target =
-            if (component.packageName == "com.autonavi.amapauto") {
-                "com.autonavi.amapauto/.MainMapActivity --windowingMode 1"
-            } else {
-                component.flattenToShortString()
-            }
+        val target = component.flattenToShortString()
         if (!current()) return false
         val result =
             if (onTarget) {
@@ -2042,6 +1962,11 @@ object VirtualLauncher {
             }
             // 合成器切到目标屏（超采样屏等其出帧再切；原生屏即时切换）
             composer?.requestActiveApp(targetDisplay == appHiDisplayId)
+            // A successful explicit launch already identifies the requested app and screen. The
+            // same foreground probe subsequently corrects this if Android shows another package.
+            composer?.requestRightRail(presentation, targetDisplay == appHiDisplayId, !dockAtBottom && component.packageName == NetEaseCarEdition.CAR)
+            selectAppRail(targetDisplay, component.packageName)
+            checkNetEaseRail()
             if (component.packageName in VideoBarControls.packages) {
                 composer?.let { target ->
                     if (videoMonitorGeneration.getAndSet(session.generation) != session.generation) {
@@ -2115,7 +2040,12 @@ object VirtualLauncher {
             .queryIntentActivities(intent, 0)
             .asSequence()
             .map { it.activityInfo }
-            .filter { it.packageName != context.packageName }
+            .filter { it.packageName != context.packageName && !BaiduCruise.isExcludedCarMap(it.packageName, it.applicationInfo.category) }
+            // Keep frequently projected apps selectable on phones with many launcher entries.
+            .filterIndexed { index, info ->
+                index < 200 || info.packageName == BaiduCruise.PACKAGE ||
+                    info.packageName == CarVideoSources.CHEYU || info.packageName == "com.ss.android.ugc.aweme"
+            }
             .map { info ->
                 val label = info.loadLabel(pm).toString()
                 AppEntry(
@@ -2123,7 +2053,7 @@ object VirtualLauncher {
                     label = label,
                     icon = info.loadIcon(pm),
                 ) to pinyinKey(label)
-            }.take(200)
+            }
             .toList()
             .sortedBy { it.second }
             .map { it.first }
@@ -2196,20 +2126,229 @@ object VirtualLauncher {
             }
     }
 
+    private val ownContentResumes = java.util.concurrent.atomic.AtomicLong()
+
+    internal fun onDeckContentResumed(display: Int, activity: String) {
+        if (display > 0 && display == activeAppDisplayId() && !mapFullscreen) {
+            // Returning to the dashboard can reconfigure a settings activity that is already
+            // behind the grid. Its late resume must not reclaim the dashboard's display size.
+            if (dashboardMode) {
+                if (activity == GridActivity::class.java.name) selectAppRail()
+                return
+            }
+            // Multiple activities may be RESUMED on one virtual display after a resize. A hidden
+            // grid receiving that callback must not shrink the foreground app and restart both pages.
+            if (activity == GridActivity::class.java.name && railOwner != null) {
+                checkNetEaseRail()
+                return
+            }
+            ownContentResumes.incrementAndGet()
+            composer?.requestRightRail(presentationRevision(), false, false)
+            if (activity == GridActivity::class.java.name) selectAppRail() else selectAppRail(display, activity)
+        }
+    }
+
+    private val railProbeBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** A media session or a phone task may continue playing behind another projected app. */
+    internal fun checkNetEaseRail() {
+        val session = launchSession
+        val renderer = composer ?: return
+        if (dashboardMode || mapFullscreen || appContextRef == null) return
+        val revision = presentationRevision()
+        val display = activeAppDisplayId()
+        val ownResume = ownContentResumes.get()
+        val expectedScene = synchronized(appRailLock) { appRail.scene } ?: return
+        if (expectedScene.display != display) return
+        if (display <= 0 || !railProbeBusy.compareAndSet(false, true)) return
+        Bg.run("music-rail") {
+            try {
+                val top = Shell.exec("dumpsys -t 1 activity activities | ${CarAppForeground.ACTIVITY_FILTER}", timeoutMs = 1500)
+                val foreground = if (top.ok && !top.output.contains("DUMP TIMEOUT"))
+                    CarAppForeground.topOnDisplay(top.output, display)?.component else null
+                if (foreground != null) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        if (launchSession === session && composer === renderer && presentationRevision() == revision &&
+                            ownContentResumes.get() == ownResume && !dashboardMode && !mapFullscreen && activeAppDisplayId() == display) {
+                            val pkg = foreground.substringBefore('/')
+                            val activity = foreground.substringAfter('/')
+                            synchronized(appRailLock) {
+                                if (appRail.scene != expectedScene) return@post
+                                if (pkg == appContextRef?.packageName && activity == GridActivity::class.java.name) selectAppRail()
+                                else {
+                                    val key = if (pkg != appContextRef?.packageName) pkg else when (activity) {
+                                        io.github.shaonialife.cardeck.PhoneSettingsActivity::class.java.name,
+                                        io.github.shaonialife.cardeck.SettingsContentActivity::class.java.name -> SettingsActivity::class.java.name
+                                        else -> activity
+                                    }
+                                    selectAppRail(display, key)
+                                }
+                                renderer.requestRightRail(revision, display == appHiDisplayId, !dockAtBottom && pkg == NetEaseCarEdition.CAR)
+                            }
+                        }
+                    }
+                }
+            } finally {
+                railProbeBusy.set(false)
+            }
+        }
+    }
+
     private val videoMonitorGeneration = java.util.concurrent.atomic.AtomicLong(-1)
+
+    @Volatile private var dockVideoTarget: VideoBarControls.Target? = null
+    private val dockBackPending = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    internal fun dockVideoBackTarget(): VideoBarControls.Target? = dockVideoTarget?.takeIf { target ->
+        isCurrentSession(target.generation) && target.revision == presentationRevision() &&
+            activeAppDisplayId() == target.display && composer?.isActiveAppHi() == target.hi && !dashboardMode && !mapFullscreen
+    }
+
+    internal fun sendDockVideoBack(target: VideoBarControls.Target, allowed: () -> Boolean = { true }) {
+        if (!dockBackPending.compareAndSet(false, true)) return
+        Bg.run("dock-video-back") {
+            try {
+                val result = YoukuDockBack.send(
+                    target,
+                    current = { allowed() && dockVideoBackTarget() == target },
+                    foreground = { videoForeground(target.generation, target.revision, target.display, target.hi) },
+                    dispatch = { display ->
+                        CarInputClient.service?.sendNavigationKey(display, android.view.KeyEvent.KEYCODE_BACK, false) == true
+                    },
+                )
+                logSink?.invoke("VIDEO-BACK: dock result=$result display=${target.display} task=${target.task} activity=${target.component}")
+            } catch (error: Exception) {
+                logSink?.invoke("VIDEO-BACK: dock error=${error.javaClass.simpleName} display=${target.display}")
+            } finally {
+                dockBackPending.set(false)
+            }
+        }
+    }
+
+    private val appToolPending = java.util.concurrent.atomic.AtomicBoolean()
+    private val pointerRevision = java.util.concurrent.atomic.AtomicLong()
+    @Volatile private var pointerGrant: (() -> Boolean)? = null
+
+    internal fun cancelAppPointer() {
+        pointerRevision.incrementAndGet()
+        pointerGrant = null
+        composer?.let { renderer ->
+            if (renderer.appPointer != null) renderer.appPointer = null
+            val hint = renderer.appPointerHint
+            if (hint != null && renderer.shortcutNotice === hint) renderer.shortcutNotice = null
+            renderer.appPointerHint = null
+        }
+    }
+
+    private fun appToolNotice(target: VideoBarControls.Target, text: String, pointerHint: Boolean = false) {
+        val renderer = composer ?: return
+        if (target.revision != presentationRevision() || !isCurrentSession(target.generation)) return
+        val notice = ShortcutNotice.create(text, streamWidthPx, streamHeightPx) ?: return
+        if (pointerHint) renderer.appPointerHint = notice
+        renderer.shortcutNotice = notice
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (renderer.shortcutNotice === notice) renderer.shortcutNotice = null
+            if (renderer.appPointerHint === notice) renderer.appPointerHint = null
+        }, 2200)
+    }
+
+    internal fun useCheyuTool(target: VideoBarControls.Target, tool: CheyuDockTool, allowed: () -> Boolean) {
+        if (target.pkg != CarVideoSources.CHEYU) return
+        val renderer = composer ?: return
+        val client = io.github.shaonialife.cardeck.SessionController.currentClient
+        val guarded = client != null && io.github.shaonialife.cardeck.airplay.BmwControlIapCompatibility.matches(client.receiverIdentity())
+        val grant = client?.controllerInputRevision
+        val revision = pointerRevision.get()
+        fun current() = allowed() && composer === renderer && dockVideoBackTarget() == target &&
+            client === io.github.shaonialife.cardeck.SessionController.currentClient && client?.cancelled != true &&
+            (!guarded || grant != null && client?.controllerInputRevision == grant)
+        if (!current() || !appToolPending.compareAndSet(false, true)) return
+        Bg.run("cheyu-dock-control") {
+            try {
+                if (!current() || videoForeground(target.generation, target.revision, target.display, target.hi) != target ||
+                    !current() || pointerRevision.get() != revision) return@run
+                if (tool == CheyuDockTool.POINTER) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        if (current() && pointerRevision.get() == revision) {
+                            pointerGrant = ::current
+                            val area = appAreaRect() ?: return@post
+                            renderer.appPointer = CarAppPoint(target, area.width().toInt() / 2, area.height().toInt() / 2)
+                            appToolNotice(target, "拨动移指针 · 旋转滚动 · 按下选择 · 返回退出", pointerHint = true)
+                        }
+                    }
+                } else {
+                    val size = hintDisplaySize(target.display) ?: return@run
+                    val stroke = tool.stroke(size.first, size.second) ?: return@run
+                    if (current() && pointerRevision.get() == revision) {
+                        CarInputClient.service?.swipe(target.display, stroke.x, stroke.fromY, stroke.x, stroke.toY, 240)
+                    }
+                }
+            } finally { appToolPending.set(false) }
+        }
+    }
+
+    internal fun routeAppPointer(input: CarControllerInput, allowed: () -> Boolean): Boolean {
+        val renderer = composer ?: return false
+        val point = renderer.appPointer ?: return false
+        val target = point.target
+        val area = appAreaRect() ?: return false
+        val width = area.width().toInt().coerceAtLeast(1)
+        val height = area.height().toInt().coerceAtLeast(1)
+        if (pointerGrant?.invoke() != true || dockVideoBackTarget() != target || !allowed()) {
+            cancelAppPointer()
+            return true
+        }
+        when (input.action) {
+            CarControllerAction.BACK -> cancelAppPointer()
+            CarControllerAction.LEFT, CarControllerAction.RIGHT,
+            CarControllerAction.UP, CarControllerAction.DOWN ->
+                renderer.appPointer = point.move(input.action, input.steps, width, height)
+            else -> {
+                if (renderer.drawnAppPointer !== point || !appToolPending.compareAndSet(false, true)) return true
+                fun current() = allowed() && pointerGrant?.invoke() == true && renderer.appPointer === point &&
+                    renderer.drawnAppPointer === point && dockVideoBackTarget() == target
+                Bg.run("cheyu-pointer") {
+                    try {
+                        if (!current() || videoForeground(target.generation, target.revision, target.display, target.hi) != target ||
+                            !current()) return@run
+                        val size = hintDisplaySize(target.display) ?: return@run
+                        val x = (point.x.toLong() * size.first / width).toInt().coerceIn(0, size.first - 1)
+                        val y = (point.y.toLong() * size.second / height).toInt().coerceIn(0, size.second - 1)
+                        val svc = CarInputClient.service ?: return@run
+                        when (input.action) {
+                            CarControllerAction.CONFIRM -> {
+                                if (current()) svc.tap(target.display, x, y)
+                            }
+                            CarControllerAction.NEXT, CarControllerAction.PREVIOUS -> {
+                                val height = size.second
+                                val width = size.first
+                                if (height < 48 || width < 24) return@run
+                                val marginY = height / 14
+                                val span = (height * (0.22f + 0.07f * (input.steps.coerceIn(1, 6) - 1))).toInt()
+                                val down = input.action == CarControllerAction.NEXT
+                                val startY = if (down) y.coerceIn(marginY + span, height - marginY)
+                                    else y.coerceIn(marginY, height - marginY - span)
+                                val column = x.coerceIn(width / 40, width - 1 - width / 40)
+                                if (current()) svc.swipe(target.display, column, startY, column, startY + if (down) -span else span, 240)
+                            }
+                            else -> Unit
+                        }
+                    } finally { appToolPending.set(false) }
+                }
+            }
+        }
+        return true
+    }
 
     private fun videoForeground(generation: Long, revision: Long, display: Int, hi: Boolean): VideoBarControls.Target? {
         if (display <= 0 || dashboardMode || mapFullscreen) return null
         val top = Shell.exec(
-            "dumpsys -t 1 activity activities | grep -E '^[[:space:]]*(Display[ :]|topResumedActivity|mResumedActivity|Resumed:)'",
+            "dumpsys -t 1 activity activities | ${CarAppForeground.ACTIVITY_FILTER}",
             timeoutMs = 1500,
         )
-        if (!top.ok) return null
-        for (pkg in VideoBarControls.packages) {
-            val activity = mapPackagePlacement(display, top.output, pkg).activity ?: continue
-            return VideoBarControls.Target(generation, revision, display, hi, activity.component, activity.taskId)
-        }
-        return null
+        if (!top.ok || top.output.contains("DUMP TIMEOUT")) return null
+        val active = CarAppForeground.foregroundOnDisplay(top.output, display) ?: return null
+        return VideoBarControls.Target(generation, revision, display, hi, active.component, active.task)
     }
 
     /** SurfaceView evidence must name this foreground activity, including on single-activity players. */
@@ -2237,6 +2376,8 @@ object VirtualLauncher {
                 val current = videoForeground(generation, presentationRevision(), display, hi) ?: return@runCatching false
                 if (current != previous) motion.reset()
                 candidate = current
+                // The native feed fills the display and has its own controls.
+                if (current.pkg == CarVideoSources.CHEYU) return@runCatching false
                 val media = MediaSessionsState.forPackage(current.pkg)
                 val playing = media?.reportedPlaying
                 if (playing == false || (playing == null && !hasVideoSurface(current))) {
@@ -2248,6 +2389,20 @@ object VirtualLauncher {
                 renderer.sampleVideoControls(current, playing, canPause, motion)
             }.getOrElse { motion.reset(); false }
             if (!applied) renderer.clearVideoControls()
+            if (live()) {
+                val nextTarget = candidate?.takeIf { YoukuDockBack.supports(it.pkg) }
+                if (dockVideoTarget != nextTarget) {
+                    dockVideoTarget = nextTarget
+                    notifyRunningAppsChanged()
+                }
+                val point = renderer.appPointer
+                if (point != null && (point.target != nextTarget || pointerGrant?.invoke() != true)) {
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        if (composer === renderer && renderer.appPointer === point &&
+                            (point.target != dockVideoBackTarget() || pointerGrant?.invoke() != true)) cancelAppPointer()
+                    }
+                }
+            }
             previous = candidate
             val visible = candidate?.pkg?.takeIf { applied }
             if (visible != visibleFor && live()) {

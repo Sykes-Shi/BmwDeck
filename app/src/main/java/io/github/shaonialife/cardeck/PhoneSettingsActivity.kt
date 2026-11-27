@@ -10,17 +10,25 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import io.github.shaonialife.cardeck.launcher.VirtualLauncher
+import io.github.shaonialife.cardeck.launcher.SettingsActivity
 import io.github.shaonialife.cardeck.launcher.settings.SettingsMenus
 import io.github.shaonialife.cardeck.launcher.settings.SettingsToastHost
+import io.github.shaonialife.cardeck.ui.PhoneWindowFrame
 
 /**
  * 手机侧「车机设置」二级菜单页（M3 暗色）：
  * 列出五个设置入口，点击进入内容 Fragment——与车机 SettingsActivity 双栏共用同一套面板。
  */
 class PhoneSettingsActivity : AppCompatActivity() {
+    override fun onResume() {
+        super.onResume()
+        noteProjectedSettings(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_phone_settings)
+        PhoneWindowFrame.install(this, R.layout.activity_phone_settings)
         findViewById<ImageView>(R.id.btnBack).setOnClickListener { finish() }
 
         val list = findViewById<RecyclerView>(R.id.menuList)
@@ -68,10 +76,15 @@ class PhoneSettingsActivity : AppCompatActivity() {
 class SettingsContentActivity :
     AppCompatActivity(),
     SettingsToastHost {
+    override fun onResume() {
+        super.onResume()
+        noteProjectedSettings(this)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val menuId = intent.getIntExtra(EXTRA_MENU, SettingsMenus.DESKTOP)
-        setContentView(R.layout.activity_settings_content)
+        PhoneWindowFrame.install(this, R.layout.activity_settings_content)
         findViewById<ImageView>(R.id.btnBack).setOnClickListener { finish() }
         findViewById<TextView>(R.id.contentTitle).text = SettingsMenus.titleOf(menuId)
 
@@ -101,5 +114,14 @@ class SettingsContentActivity :
                     .putExtra(EXTRA_MENU, item.id),
             )
         }
+    }
+}
+
+
+/** The portrait car settings share these screens with the phone. Only the current projected grid owns its rail. */
+private fun noteProjectedSettings(activity: AppCompatActivity) {
+    val display = activity.display?.displayId ?: return
+    if (display > 0 && display == VirtualLauncher.gridDisplayId) {
+        VirtualLauncher.onDeckContentResumed(display, SettingsActivity::class.java.name)
     }
 }

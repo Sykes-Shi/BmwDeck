@@ -36,6 +36,14 @@ class DebugFileLogTest {
     }
 
     @Test
+    fun upgradeReadsTheLatestSessionAcrossBothNames() {
+        val old = "===== CarDeck 进程启动（本次日志起点）====="
+        val new = DebugFileLog.SESSION_MARKER
+        assertEquals("previous", DebugFileLog.currentSessionSlice("before${old}previous"))
+        assertEquals("current", DebugFileLog.currentSessionSlice("${old}previous${new}current"))
+    }
+
+    @Test
     fun emptyFileStaysEmpty() {
         assertEquals("", DebugFileLog.currentSessionSlice(""))
     }

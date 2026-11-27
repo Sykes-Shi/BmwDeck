@@ -19,7 +19,9 @@ import android.widget.TextView
 import io.github.shaonialife.cardeck.R
 import io.github.shaonialife.cardeck.input.CarControllerInput
 import io.github.shaonialife.cardeck.input.CarControllerAction
+import io.github.shaonialife.cardeck.media.CarVideoSources
 import io.github.shaonialife.cardeck.input.DockControllerNavigation
+import io.github.shaonialife.cardeck.render.VideoBarControls
 import io.github.shaonialife.cardeck.ui.WallpaperSelection
 import io.github.shaonialife.cardeck.ui.WallpaperStore
 import io.github.shaonialife.cardeck.util.Bg
@@ -36,6 +38,15 @@ class DockActivity : CarAppearanceActivity() {
     companion object {
         // All access is on the main looper. An old activity cannot receive a new display's keys.
         private var showing = java.lang.ref.WeakReference<DockActivity>(null)
+        private val mainHandler = Handler(Looper.getMainLooper())
+        internal fun noteMapInteraction() {
+            mainHandler.post {
+                showing.get()?.let {
+                    it.retryKeyboardCheck = true
+                    it.scheduleKeyboardCheck()
+                }
+            }
+        }
         internal fun handleController(input: CarControllerInput, at: Long, scene: () -> Boolean, grant: () -> Boolean): Boolean {
             val activity = showing.get() ?: return false
             return activity.ownsDock() && activity.route(input, at, scene, grant)
@@ -52,6 +63,56 @@ class DockActivity : CarAppearanceActivity() {
     private var screenGrant: (() -> Boolean)? = null
     private var selectedTag: Any? = null
     private val home get() = findViewById<ImageView>(R.id.dockHome)
+    private val suggestionsButton get() = findViewById<TextView>(R.id.dockBaiduSuggestions)
+    private var keyboardProbePending = false
+    private var retryKeyboardCheck = false
+    private var keyboardScene: Long? = null
+
+    private val checkKeyboard = Runnable {
+        val display = VirtualLauncher.mapDisplayId
+        val scene = VirtualLauncher.presentationRevision()
+        if (ownsDock() && VirtualLauncher.mapFullscreen && !keyboardProbePending) {
+            keyboardProbePending = true
+            Bg.run("baidu-keyboard-visible") {
+                val visible = runCatching { VirtualLauncher.baiduHasCarKeyboard(display) }.getOrDefault(false)
+                runOnUiThread {
+                    keyboardProbePending = false
+                    if (!ownsDock()) return@runOnUiThread
+                    keyboardScene = scene.takeIf { visible && VirtualLauncher.mapDisplayId == display }
+                    val compact = VirtualLauncher.updateBaiduKeyboardLayout(display, scene, visible)
+                    renderKeyboardButton()
+                    val retry = retryKeyboardCheck
+                    retryKeyboardCheck = false
+                    if (suggestionsButton.visibility == View.VISIBLE || compact || retry) scheduleKeyboardCheck(if (visible) 1800 else 1100)
+                }
+            }
+        } else renderKeyboardButton()
+    }
+
+    private fun scheduleKeyboardCheck(delay: Long = 450L) {
+        pollHandler.removeCallbacks(checkKeyboard)
+        pollHandler.postDelayed(checkKeyboard, delay)
+    }
+
+    private fun renderKeyboardButton() {
+        val visible = VirtualLauncher.mapFullscreen && keyboardScene == VirtualLauncher.presentationRevision()
+        suggestionsButton.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible && selectedTag == R.id.dockBaiduSuggestions) select(home)
+    }
+
+    private fun dismissKeyboard(allowed: () -> Boolean = { true }) {
+        val scene = keyboardScene ?: return
+        val display = VirtualLauncher.mapDisplayId
+        Bg.run("baidu-keyboard-close") {
+            VirtualLauncher.dismissBaiduKeyboard(display) {
+                allowed() && VirtualLauncher.isCurrentSession(dockGeneration) &&
+                    VirtualLauncher.presentationRevision() == scene && VirtualLauncher.mapDisplayId == display && VirtualLauncher.mapFullscreen
+            }
+            noteMapInteraction()
+        }
+    }
+    private var renderedVideoTarget: VideoBarControls.Target? = null
+    private val backButton get() = findViewById<ImageView>(R.id.dockVideoBack)
     private val mapButton get() = findViewById<ImageView>(R.id.dockControllerMap)
     private fun ownsDock() = VirtualLauncher.isCurrentSession(dockGeneration) &&
         VirtualLauncher.dockDisplayId > 0 && display?.displayId == VirtualLauncher.dockDisplayId && !isDestroyed && !isFinishing
@@ -65,6 +126,7 @@ class DockActivity : CarAppearanceActivity() {
     private val dashboardIconListener: (Boolean) -> Unit = { runOnUiThread { renderHome() } }
 
     private fun renderHome() {
+        renderKeyboardButton()
         val grid = navigation.active
         val dashboard = VirtualLauncher.dashboardMode
         home.setImageResource(if (grid || !dashboard) R.drawable.ic_dock_dashboard else R.drawable.ic_dock_home)
@@ -88,8 +150,10 @@ class DockActivity : CarAppearanceActivity() {
 
     private fun entries(): List<View> = buildList {
         if (barForm) add(home)
+        if (backButton.visibility == View.VISIBLE) add(backButton)
         appsContainer?.let { container -> for (i in 0 until container.childCount) add(container.getChildAt(i)) }
         if (mapButton.visibility == View.VISIBLE) add(mapButton)
+        if (suggestionsButton.visibility == View.VISIBLE) add(suggestionsButton)
         if (!barForm) add(home)
     }
 
@@ -116,7 +180,10 @@ class DockActivity : CarAppearanceActivity() {
         val nav = VirtualLauncher.navigationRevision()
         when (tag) {
             R.id.dockHome -> VirtualLauncher.openControllerAppList(allowed)
+            R.id.dockVideoBack -> renderedVideoTarget?.let { VirtualLauncher.sendDockVideoBack(it, allowed) }
             R.id.dockControllerMap -> VirtualLauncher.submitShortcut(CarShortcut.MAP, allowed)
+            R.id.dockBaiduSuggestions -> dismissKeyboard(allowed)
+            is CheyuDockTool -> renderedVideoTarget?.let { VirtualLauncher.useCheyuTool(it, tag, allowed) }
             is ComponentName -> Bg.run("dock-controller-app") {
                 if (allowed()) VirtualLauncher.launchApp(tag, expectedSession = generation, expectedNavigation = nav)
             }
@@ -124,24 +191,40 @@ class DockActivity : CarAppearanceActivity() {
     }
 
     private fun route(input: CarControllerInput, at: Long, scene: () -> Boolean, grant: () -> Boolean): Boolean {
-        if (lease?.invoke() == false) leaveDock()
-        return when (navigation.route(input.action, at)) {
+        val frame = VirtualLauncher.appRailFrame
+        val onRight = frame?.rightDock ?: VirtualLauncher.dockOnRight
+        val collapsed = frame?.expanded == false
+        val generation = frame?.sceneGeneration
+        fun sameApp() = if (generation == null) VirtualLauncher.appRailFrame == null
+            else VirtualLauncher.appRailFrameCurrent(generation)
+        if (navigation.dockOnRight != onRight || lease?.invoke() == false) leaveDock()
+        if (!sameApp()) return false
+        navigation.dockOnRight = onRight
+        return when (navigation.route(input.action, at, collapsed)) {
             DockControllerNavigation.Route.CONTENT -> {
-                // A single left still reaches the app. Its own focus/page change is allowed
-                // between left edges; a receiver borrow, reconnection or touch cancels the pair.
-                lease = if (input.action == CarControllerAction.LEFT) grant else null
+                // The first press still reaches the app so its native controls remain reachable.
+                lease = if (input.action == navigation.entryDirection(collapsed)) ({ grant() && sameApp() }) else null
                 false
             }
             DockControllerNavigation.Route.ENTER -> {
-                lease = scene
+                if (collapsed && !VirtualLauncher.setAppRailExpanded(true, generation)) {
+                    leaveDock()
+                    return false
+                }
+                lease = { scene() && sameApp() && (VirtualLauncher.appRailFrame?.rightDock ?: VirtualLauncher.dockOnRight) == onRight }
                 screenGrant = grant
                 renderHome()
-                select(home)
+                select(appsContainer?.findViewWithTag<View>(CheyuDockTool.NEXT) ?: home)
                 pollHandler.postDelayed(checkGrant, 250)
-                VirtualLauncher.logSink?.invoke("ROTARY: 左栏已选中应用列表")
+                val side = if (onRight) "右栏" else "左栏"
+                VirtualLauncher.logSink?.invoke("ROTARY: ${side}已选中 " + selectedTag)
                 true
             }
-            DockControllerNavigation.Route.LEAVE -> { leaveDock(); true }
+            DockControllerNavigation.Route.LEAVE -> {
+                leaveDock()
+                if (generation != null) VirtualLauncher.setAppRailExpanded(false, generation)
+                true
+            }
             DockControllerNavigation.Route.ACTIVATE -> { activate(selectedTag, grant); true }
             DockControllerNavigation.Route.STAY -> true
             else -> {
@@ -176,7 +259,8 @@ class DockActivity : CarAppearanceActivity() {
         object : Runnable {
             override fun run() {
                 refresh()
-                pollHandler.postDelayed(this, 3_000)
+                VirtualLauncher.checkNetEaseRail()
+                pollHandler.postDelayed(this, if (VirtualLauncher.dockOnRight) 900 else 3_000)
             }
         }
 
@@ -226,8 +310,18 @@ class DockActivity : CarAppearanceActivity() {
         batteryFill = findViewById(R.id.dockBatteryFill)
         appsContainer = findViewById(R.id.dockApps)
         wallpaperView = findViewById(R.id.dockWallpaper)
+        backButton.tag = R.id.dockVideoBack
+        backButton.setOnClickListener {
+            val target = renderedVideoTarget
+            if (target != null && ownsDock()) {
+                leaveDock()
+                VirtualLauncher.sendDockVideoBack(target)
+            }
+        }
         home.tag = R.id.dockHome
         mapButton.tag = R.id.dockControllerMap
+        suggestionsButton.tag = R.id.dockBaiduSuggestions
+        suggestionsButton.setOnClickListener { if (ownsDock()) dismissKeyboard() }
         home.setOnClickListener {
             val grant = screenGrant
             if (navigation.active && grant != null) activate(home.tag, grant)
@@ -277,27 +371,39 @@ class DockActivity : CarAppearanceActivity() {
     }
 
     override fun onCarAppearanceChanged(day: Boolean) {
+        VirtualLauncher.updateAppRailDay(display?.displayId ?: -1, day)
         refreshWallpaperIfChanged()
         applyDockPrefs()
         clockView?.setTextColor(carPalette.text)
         batteryText?.setTextColor(carPalette.secondary)
         val palette = carPalette
+        palette.background(suggestionsButton, R.drawable.bg_dock_control)
+        suggestionsButton.setTextColor(palette.text)
         val glyphTint = ColorStateList(
             arrayOf(intArrayOf(android.R.attr.state_activated), intArrayOf()),
             intArrayOf(palette.onAccent, palette.text),
         )
-        for (button in listOf(home, mapButton)) {
+        for (button in listOf(home, mapButton, backButton)) {
             palette.background(button, R.drawable.bg_dock_control)
             button.imageTintList = glyphTint
         }
         appsContainer?.let { container ->
-            for (i in 0 until container.childCount) palette.background(container.getChildAt(i), R.drawable.bg_dock_control)
+            for (i in 0 until container.childCount) {
+                val item = container.getChildAt(i)
+                if (item is TextView && item.tag is CheyuDockTool) {
+                    palette.focusButton(item, R.drawable.bg_dock_control, 8)
+                    item.setTextColor(palette.focusContent(palette.text))
+                } else palette.background(item, R.drawable.bg_dock_control)
+            }
         }
     }
 
     override fun onStart() {
         super.onStart()
-        if (ownsDock()) showing = java.lang.ref.WeakReference(this)
+        if (ownsDock()) {
+            showing = java.lang.ref.WeakReference(this)
+            if (VirtualLauncher.mapFullscreen) scheduleKeyboardCheck()
+        }
     }
 
     override fun onStop() {
@@ -446,16 +552,47 @@ class DockActivity : CarAppearanceActivity() {
 
     private fun refresh() {
         val container = appsContainer ?: return
+        val target = VirtualLauncher.dockVideoBackTarget()
+        val targetChanged = renderedVideoTarget != target
+        renderedVideoTarget = target
+        val cheyu = target?.pkg == CarVideoSources.CHEYU
+        backButton.contentDescription = if (cheyu) "车鱼视听返回上一级" else "优酷返回上一级"
+        backButton.visibility = if (renderedVideoTarget == null) View.GONE else View.VISIBLE
+        if (renderedVideoTarget == null && selectedTag == R.id.dockVideoBack) select(home)
         val current =
             synchronized(VirtualLauncher.runningApps) {
                 VirtualLauncher.runningApps.map { it.flattenToString() }
             }
-        if (current == lastRendered) return
+        if (current == lastRendered && !targetChanged) return
         lastRendered = current
         container.removeAllViews()
         val density = resources.displayMetrics.density
         val iconPx = ((if (barForm) 32 else 30) * density).toInt()
         val pad = (6 * density).toInt()
+        if (target != null && cheyu) {
+            for (tool in CheyuDockTool.entries) {
+                val button = TextView(this).apply {
+                    tag = tool
+                    text = tool.label
+                    contentDescription = tool.description
+                    gravity = android.view.Gravity.CENTER
+                    setTextColor(carPalette.focusContent(carPalette.text))
+                    setSingleLine()
+                    setAutoSizeTextTypeUniformWithConfiguration(8, 14, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
+                    carPalette.focusButton(this, R.drawable.bg_dock_control, 8)
+                    setOnClickListener {
+                        if (ownsDock()) {
+                            leaveDock()
+                            VirtualLauncher.useCheyuTool(target, tool, ::ownsDock)
+                        }
+                    }
+                }
+                val edge = (42 * density).toInt()
+                container.addView(button, LinearLayout.LayoutParams(
+                    if (barForm) edge else LinearLayout.LayoutParams.MATCH_PARENT,
+                    if (barForm) LinearLayout.LayoutParams.MATCH_PARENT else edge))
+            }
+        }
         val apps = synchronized(VirtualLauncher.runningApps) { VirtualLauncher.runningApps.toList() }
         val iconCache = VirtualLauncher.iconCache
         apps.forEach { component ->

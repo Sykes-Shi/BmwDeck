@@ -83,6 +83,7 @@ class SettingsActivity :
     override fun onResume() {
         super.onResume()
         if (carSession < 0 || display?.displayId != VirtualLauncher.gridDisplayId || !VirtualLauncher.isCurrentSession(carSession)) finish()
+        else LauncherActivityTracker.onResumed(this, VirtualLauncher.gridDisplayId)
     }
 
     override fun onDestroy() {

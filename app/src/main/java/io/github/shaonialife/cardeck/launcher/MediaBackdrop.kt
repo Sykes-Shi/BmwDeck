@@ -1,55 +1,40 @@
 package io.github.shaonialife.cardeck.launcher
 
-import android.graphics.Bitmap
-import android.graphics.RenderEffect
-import android.graphics.Shader
+import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.view.View
-import android.widget.ImageView
-import androidx.core.graphics.ColorUtils
 import io.github.shaonialife.cardeck.media.ArtworkTone
 
-/** 复用后台已解码的小封面；柔化交给渲染器，主线程不重新解码或逐像素处理。 */
-internal class MediaBackdrop(private val image: ImageView, private val veil: View) {
-    private var blurredArt: Bitmap? = null
-    private var shownColor: Int? = null
+/** A translucent field of sampled album color. The foreground cover is the only bitmap. */
+internal class MediaBackdrop(private val glass: View) {
     private var shownDay: Boolean? = null
+    private var shownSeed: Int? = null
+    private var shownTone: Int? = null
 
-    init {
-        image.alpha = 0f
-        image.scaleType = ImageView.ScaleType.CENTER_CROP
-        val radius = 28f * image.resources.displayMetrics.density
-        image.setRenderEffect(RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP))
-    }
+    fun bind(hasArt: Boolean, tone: Int, seed: Int?, palette: ProjectedPalette) {
+        if (!hasArt) {
+            if (shownDay != null) clear()
+            return
+        }
+        if (shownDay == palette.day && shownSeed == seed && shownTone == tone) return
+        shownDay = palette.day
+        shownSeed = seed
+        shownTone = tone
 
-    fun bind(art: Bitmap?, color: Int, daylightColor: Int?, palette: ProjectedPalette) {
-        // Daylight uses opaque cover-derived colors. Only night needs a second, blurred cover.
-        val blurred = if (palette.day) null else art
-        if (blurredArt !== blurred) {
-            blurredArt = blurred
-            image.setImageBitmap(blurred)
-            image.alpha = if (blurred == null) 0f else 0.55f
-        }
-        val seed = if (palette.day) daylightColor.takeIf { art != null } else color
-        if (shownColor != seed || shownDay != palette.day) {
-            shownDay = palette.day
-            shownColor = seed
-            image.setBackgroundColor(color)
-            val surface = palette.surface
-            val stops = if (palette.day) ArtworkTone.daylightStops(seed, surface) else intArrayOf(
-                ColorUtils.setAlphaComponent(ColorUtils.blendARGB(color, surface, 0.42f), 238), surface,
-            )
-            veil.background = GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                stops,
-            )
-        }
+        val stops = ArtworkTone.glassStops(seed, tone, palette.surface, palette.day)
+        val pigment = GradientDrawable(GradientDrawable.Orientation.TL_BR, stops)
+        val sheen = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(Color.argb(if (palette.day) 28 else 12, 255, 255, 255), Color.TRANSPARENT),
+        )
+        glass.background = LayerDrawable(arrayOf(pigment, sheen))
     }
 
     fun clear() {
-        blurredArt = null
         shownDay = null
-        image.setImageDrawable(null)
-        image.alpha = 0f
+        shownSeed = null
+        shownTone = null
+        glass.background = null
     }
 }

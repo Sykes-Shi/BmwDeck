@@ -55,6 +55,7 @@ class DualDisplayComposer(
     private val outHeight: Int,
     /** true：dock 是底部横条（竖屏车机）；false：dock 是左侧竖条（横屏车机）。 */
     private val dockAtBottom: Boolean = false,
+    private val appDensityDpi: Int = 160,
 ) {
     /** 仪表盘↔桌面滑动进度（0=tile 原位，1=完全滑出左侧），由 GridActivity 随滑动驱动。 */
     @Volatile
@@ -174,6 +175,13 @@ class DualDisplayComposer(
         }
     }
 
+    private fun videoButtons(bars: VideoBarControls.Bars, canPause: Boolean): List<VideoBarControls.Button> {
+        val frame = drawnAppRail ?: return VideoBarControls.buttons(bars, appLeft, outWidth, projectedAppHeight, canPause)
+        return VideoBarControls.buttons(bars, frame.contentLeft, frame.contentRight, frame.contentHeight, canPause)
+            .map { it.copy(top = it.top + frame.contentTop, bottom = it.bottom + frame.contentTop) }
+            .filterNot { b -> frame.containsDock(((b.left + b.right) / 2).toInt(), ((b.top + b.bottom) / 2).toInt()) }
+    }
+
     internal fun sampleVideoControls(
         target: VideoBarControls.Target, playing: Boolean?, canPause: Boolean, motion: VideoBarControls.Motion,
     ): Boolean {
@@ -184,7 +192,7 @@ class DualDisplayComposer(
         }
         val now = android.os.SystemClock.uptimeMillis()
         if (!motion.playing(frame.first, frame.second, now, playing) || !matchesVideoTarget(target)) return false
-        val buttons = VideoBarControls.buttons(frame.second, appLeft, outWidth, projectedAppHeight, canPause)
+        val buttons = videoButtons(frame.second, canPause)
         if (buttons.isEmpty()) return false
         videoControls = VideoControls(target, buttons, now + 1500L)
         overlayDirty = true
@@ -199,8 +207,40 @@ class DualDisplayComposer(
         if (current.target != hit.target || hit.button !in current.buttons) return false
         val bars = readVideoBars(hit.target.hi, timeoutMs)?.second ?: return false
         val canPause = current.buttons.any { it.action == VideoBarControls.Action.PAUSE }
-        return hit.button in VideoBarControls.buttons(bars, appLeft, outWidth, projectedAppHeight, canPause) &&
+        return hit.button in videoButtons(bars, canPause) &&
             currentVideoControls()?.target == hit.target
+    }
+
+    @Volatile internal var appPointer: io.github.shaonialife.cardeck.launcher.CarAppPoint? = null
+        set(value) { field = value; overlayDirty = true }
+    @Volatile internal var appPointerHint: OverlayCard? = null
+    @Volatile internal var drawnAppPointer: io.github.shaonialife.cardeck.launcher.CarAppPoint? = null
+        private set
+
+    private data class AppRail(val expanded: Boolean, val fullscreenBuffer: Boolean, val sceneGeneration: Long)
+    @Volatile private var appRail: AppRail? = null
+    @Volatile internal var drawnAppRail: AppRailFrame? = null
+        private set
+
+    internal fun setAppRail(eligible: Boolean, expanded: Boolean, fullscreenBuffer: Boolean, sceneGeneration: Long = 0) {
+        val next = if (eligible) AppRail(expanded, fullscreenBuffer, sceneGeneration) else null
+        if (next != appRail) {
+            appRail = next
+            overlayDirty = true
+        }
+    }
+
+    private data class RightRail(val presentation: Long, val hi: Boolean)
+    @Volatile private var rightRail: RightRail? = null
+    @Volatile internal var drawnRightRail = false
+        private set
+
+    internal fun requestRightRail(presentation: Long, hi: Boolean, enabled: Boolean) {
+        val next = if (enabled && !dockAtBottom) RightRail(presentation, hi) else null
+        if (rightRail != next) {
+            rightRail = next
+            overlayDirty = true
+        }
     }
 
     @Volatile private var appLeft = 0
@@ -355,7 +395,17 @@ class DualDisplayComposer(
         width: Int,
         height: Int,
     ) {
-        mapInput?.surfaceTexture?.setDefaultBufferSize(width, height)
+        resizeInput(mapInput, width, height)
+    }
+
+    internal fun resizeAppInput(hi: Boolean, width: Int, height: Int) =
+        resizeInput(if (hi) appHi else appInput, width, height)
+
+    private fun resizeInput(input: Input?, width: Int, height: Int) {
+        if (input == null || width <= 0 || height <= 0) return
+        input.surfaceTexture.setDefaultBufferSize(width, height)
+        input.geometry = InputSize(width, height)
+        overlayDirty = true
     }
 
     fun stop() {
@@ -493,6 +543,8 @@ class DualDisplayComposer(
         val ouVideo = GLES20.glGetUniformLocation(overlayProgram, "uVideo")
         val ouRect = GLES20.glGetUniformLocation(overlayProgram, "uRect")
         val ouSourceMatrix = GLES20.glGetUniformLocation(overlayProgram, "uSourceMatrix")
+        var pointerTexture = 0
+        val handleTextures = mutableMapOf<Pair<Int, Boolean>, Int>()
         val buttonTextures = mutableMapOf<VideoBarControls.Action, Int>()
 
         fun uploadBitmap(texture: Int, bitmap: Bitmap): Int {
@@ -536,6 +588,7 @@ class DualDisplayComposer(
             right: Float,
             bottom: Float,
             videoInput: Input? = null,
+            railFrame: AppRailFrame? = null,
         ) {
             GLES20.glUseProgram(overlayProgram)
             GLES20.glUniform1i(ouTexture, 0)
@@ -549,9 +602,12 @@ class DualDisplayComposer(
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
                 videoInput.surfaceTexture.getTransformMatrix(matrix)
                 GLES20.glUniformMatrix4fv(ouSourceMatrix, 1, false, matrix, 0)
-                val w = (outWidth - appLeft).toFloat()
-                GLES20.glUniform4f(ouRect, (left - appLeft) / w, 1f - top / projectedAppHeight,
-                    (right - appLeft) / w, 1f - bottom / projectedAppHeight)
+                val x = railFrame?.contentLeft ?: appLeft
+                val y = railFrame?.contentTop ?: 0
+                val w = (railFrame?.contentWidth ?: (outWidth - appLeft)).toFloat()
+                val h = (railFrame?.contentHeight ?: projectedAppHeight).toFloat()
+                GLES20.glUniform4f(ouRect, (left - x) / w, 1f - (top - y) / h,
+                    (right - x) / w, 1f - (bottom - y) / h)
             }
             GLES20.glEnable(GLES20.GL_BLEND)
             GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA)
@@ -596,6 +652,8 @@ class DualDisplayComposer(
             u0: Float = 0f,
             u1: Float = 1f,
             cornerRadius: Float = 0f,
+            v0: Float = 0f,
+            v1: Float = 1f,
         ) {
             input.surfaceTexture.getTransformMatrix(matrix)
             GLES20.glUniformMatrix4fv(uSTMatrix, 1, false, matrix, 0)
@@ -627,7 +685,7 @@ class DualDisplayComposer(
                     px(x1),
                     py(y1),
                 )
-            val coords = floatBuffer(u0, 0f, u1, 0f, u0, 1f, u1, 1f)
+            val coords = floatBuffer(u0, v0, u1, v0, u0, v1, u1, v1)
             GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, positions)
             GLES20.glEnableVertexAttribArray(aPos)
             GLES20.glVertexAttribPointer(aTexCoord, 2, GLES20.GL_FLOAT, false, 0, coords)
@@ -642,6 +700,19 @@ class DualDisplayComposer(
             y0: Float,
             y1: Float,
         ) = drawInputUV(input, x0, x1, y0, y1, u0 = 0f, u1 = 1f)
+
+        fun drawAppRailContent(input: Input, frame: AppRailFrame) {
+            val x0 = frame.contentLeft.toFloat()
+            val x1 = frame.contentRight.toFloat()
+            val y0 = (outHeight - frame.contentBottom).toFloat()
+            val y1 = (outHeight - frame.contentTop).toFloat()
+            // An older display may reject resizing. Keep its image intact and extend only its border pixels.
+            if (x0 > 0) drawInputUV(input, 0f, x0, y0, y1, 0f, 0f)
+            if (x1 < outWidth) drawInputUV(input, x1, outWidth.toFloat(), y0, y1, 1f, 1f)
+            if (y0 > 0) drawInputUV(input, x0, x1, 0f, y0, v0 = 0f, v1 = 0f)
+            if (y1 < outHeight) drawInputUV(input, x0, x1, y1, outHeight.toFloat(), v0 = 1f, v1 = 1f)
+            drawInput(input, x0, x1, y0, y1)
+        }
 
         fun composeFrame(fullRedraw: Boolean) {
             // 待切应用屏：目标屏出帧即切（帧号前进 / 已有内容 600ms 兜底 / 2s 超时兜底）
@@ -691,7 +762,38 @@ class DualDisplayComposer(
                 }
             }
             val activeInput = if (activeAppHi) hi else app
-            if (dockAtBottom) {
+            val layout = tileLayout
+            val atRight = rightRail?.let {
+                !dockAtBottom && layout == TileLayout.HIDDEN && it.hi == activeAppHi &&
+                    it.presentation == VirtualLauncher.presentationRevision() && !VirtualLauncher.dashboardMode && !VirtualLauncher.mapFullscreen
+            } == true
+            val wantsMap = layout == TileLayout.FULLSCREEN && VirtualLauncher.mapFullscreen
+            val content = if (wantsMap) map else activeInput
+            val rail = appRail?.takeIf { layout != TileLayout.SPLIT && (wantsMap || !VirtualLauncher.dashboardMode) }?.let { requested ->
+                content?.let contentFrame@{ input ->
+                    val displayId = if (wantsMap) VirtualLauncher.mapDisplayId else VirtualLauncher.activeAppDisplayId()
+                    if (!VirtualLauncher.appRailFrameCurrent(requested.sceneGeneration, displayId)) return@contentFrame null
+                    val side = when {
+                        dockAtBottom -> AppRailFrame.Side.BOTTOM
+                        atRight -> AppRailFrame.Side.RIGHT
+                        else -> AppRailFrame.Side.LEFT
+                    }
+                    val geometry = input.geometry
+                    AppRailFrame(side, requested.expanded, requested.fullscreenBuffer, wantsMap, outWidth, outHeight,
+                        dockW, dockH, geometry.width, geometry.height, displayId, VirtualLauncher.presentationRevision(),
+                        densityDpi = appDensityDpi, sceneGeneration = requested.sceneGeneration)
+                }
+            }
+            if (rail != null && content != null) {
+                if (content.hasContent) drawAppRailContent(content, rail)
+                if (rail.expanded && dock.hasContent) {
+                    when (rail.side) {
+                        AppRailFrame.Side.BOTTOM -> drawInput(dock, 0f, outWidth.toFloat(), 0f, dockH.toFloat())
+                        AppRailFrame.Side.LEFT -> drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
+                        AppRailFrame.Side.RIGHT -> drawInput(dock, (outWidth - dockW).toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
+                    }
+                }
+            } else if (dockAtBottom) {
                 // 竖屏：dock 横条贴底（GL 坐标 y=0 为底边），app 在其余区域；
                 // 仪表盘时地图卡叠在应用区上半（地图上/音乐下），全屏盖满应用区。
                 if (dock.hasContent) drawInput(dock, 0f, outWidth.toFloat(), 0f, dockH.toFloat())
@@ -741,14 +843,14 @@ class DualDisplayComposer(
                 }
             } else {
                 if (activeInput?.hasContent == true) {
-                    drawInput(activeInput, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
+                    val x = if (atRight) 0f else dockW.toFloat()
+                    drawInput(activeInput, x, x + (outWidth - dockW), 0f, outHeight.toFloat())
                 }
                 // 地图层叠在应用区之上（HIDDEN 不画）：
                 //  FULLSCREEN=整个应用区；SPLIT=左半卡片区域。
                 //  地图屏经 VirtualLauncher 按布局动态 resize（分屏=tile 显示尺寸、
                 //  全屏=应用区尺寸），屏上地图应用 relayout——两种布局都是整幅
                 //  1:1 映射（旧的「全尺寸屏+中央带区裁剪采样」方案已移除）。
-                val layout = tileLayout
                 if (map?.hasContent == true && layout != TileLayout.HIDDEN) {
                     if (layout == TileLayout.FULLSCREEN) {
                         drawInput(map!!, dockW.toFloat(), outWidth.toFloat(), 0f, outHeight.toFloat())
@@ -777,16 +879,39 @@ class DualDisplayComposer(
                     }
                 }
                 // dock 最后绘制（最上层）：tile 滑动经过 dock 区域时从其下方穿过
-                if (dock.hasContent) drawInput(dock, 0f, dockW.toFloat(), 0f, outHeight.toFloat())
+                if (dock.hasContent) {
+                    val x = if (atRight) (outWidth - dockW).toFloat() else 0f
+                    drawInput(dock, x, x + dockW, 0f, outHeight.toFloat())
+                }
             }
             // 叠加卡片最后绘制（最上层，不受分支影响）：卡片坐标为输出画面坐标（顶部原点）
-            val video = currentVideoControls()?.takeIf { activeInput?.hasContent == true }
+            val point = appPointer?.takeIf { activeInput?.hasContent == true && matchesVideoTarget(it.target) &&
+                overlayCard == null && (shortcutNotice == null || shortcutNotice === appPointerHint) }
+            val video = currentVideoControls()?.takeIf { activeInput?.hasContent == true && point == null }
             video?.buttons?.forEach { button ->
                 val texture = buttonTextures.getOrPut(button.action) { uploadBitmap(0, VideoButtonArt.bitmaps.getValue(button.action)) }
-                drawOverlay(texture, button.left, button.top, button.right, button.bottom, activeInput)
+                drawOverlay(texture, button.left, button.top, button.right, button.bottom, activeInput, rail)
+            }
+            if (point != null) {
+                if (pointerTexture == 0) pointerTexture = uploadBitmap(0, CarAppPointerArt.bitmap)
+                val radius = (minOf(outWidth - appLeft, projectedAppHeight) * .023f).coerceIn(8f, 28f)
+                val x = (rail?.contentLeft ?: appLeft) + point.x
+                val y = (rail?.contentTop ?: 0) + point.y
+                drawOverlay(pointerTexture, x - radius, y - radius, x + radius, y + radius)
             }
             syncOverlayTexture()?.let { card ->
                 drawOverlay(overlayTexture, card.left, card.top, card.right, card.bottom)
+            }
+            if (rail != null) {
+                val direction = RailHandleArt.direction(rail)
+                val day = VirtualLauncher.appRailDay
+                val texture = handleTextures.getOrPut(direction to day) {
+                    val bitmap = RailHandleArt.bitmap(direction, day)
+                    try { uploadBitmap(0, bitmap) } finally { bitmap.recycle() }
+                }
+                val left = (rail.toggleCenterX - rail.toggleWidth / 2).toFloat()
+                val top = (rail.toggleCenterY - rail.toggleHeight / 2).toFloat()
+                drawOverlay(texture, left, top, left + rail.toggleWidth, top + rail.toggleHeight)
             }
             if (fullRedraw ||
                 overlayDirty ||
@@ -795,10 +920,15 @@ class DualDisplayComposer(
                 hi?.hasContent == true ||
                 map?.hasContent == true
             ) {
-                rotaryBrightnessProbe.onFrame(outWidth, outHeight, dockW, dockH, dockAtBottom) {
+                rotaryBrightnessProbe.onFrame(outWidth, outHeight, dockW, dockH, dockAtBottom, atRight) {
                     VirtualLauncher.logSink?.invoke(it)
                 }
-                if (EGL14.eglSwapBuffers(display, outputSurface)) drawnControls = video
+                if (EGL14.eglSwapBuffers(display, outputSurface)) {
+                    drawnAppRail = rail
+                    drawnRightRail = atRight
+                    drawnControls = video
+                    drawnAppPointer = point
+                }
             }
             overlayDirty = false
         }
@@ -842,6 +972,8 @@ class DualDisplayComposer(
             }
         } catch (_: InterruptedException) {
         } finally {
+            if (pointerTexture != 0) GLES20.glDeleteTextures(1, intArrayOf(pointerTexture), 0)
+            if (handleTextures.isNotEmpty()) GLES20.glDeleteTextures(handleTextures.size, handleTextures.values.toIntArray(), 0)
             if (buttonTextures.isNotEmpty()) GLES20.glDeleteTextures(buttonTextures.size, buttonTextures.values.toIntArray(), 0)
             if (overlayTexture != 0) {
                 runCatching { GLES20.glDeleteTextures(1, intArrayOf(overlayTexture), 0) }

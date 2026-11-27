@@ -72,10 +72,10 @@ object ShizukuGate {
 
             State.NOT_RUNNING ->
                 ShizukuGuidance(
-                    title = "CarDeck 尚未连接到 Shizuku",
+                    title = "BmwDeck 尚未连接到 Shizuku",
                     message =
-                        "当前 CarDeck 尚未连接到 Shizuku，此时连接车机会失败。\n\n" +
-                            "请打开 Shizuku，确认服务正在运行，并在「授权应用」中允许 CarDeck BMW诊断版；" +
+                        "当前 BmwDeck 尚未连接到 Shizuku，此时连接车机会失败。\n\n" +
+                            "请打开 Shizuku，确认服务正在运行，并在「授权应用」中允许 BmwDeck；" +
                             "然后返回这里点「重试检查」。若仍未接通，再尝试重新启动 Shizuku。",
                     primaryLabel = "打开 Shizuku",
                 )
@@ -238,10 +238,10 @@ object CarInputClient {
             diag("awaitReady 拒绝主线程等待", force = true)
             return false
         }
-        val deadline = android.os.SystemClock.uptimeMillis() + timeoutMs.coerceIn(0L, 12_000L)
+        val deadline = android.os.SystemClock.uptimeMillis() + timeoutMs.coerceIn(0L, 45_000L)
         ensure(context)
         while (!isCancelled() && !Thread.currentThread().isInterrupted) {
-            if (isReady()) return true
+            if (isReady() && ShizukuGate.state(context) == ShizukuGate.State.READY) return true
             if (android.os.SystemClock.uptimeMillis() >= deadline) break
             try {
                 Thread.sleep(50L)

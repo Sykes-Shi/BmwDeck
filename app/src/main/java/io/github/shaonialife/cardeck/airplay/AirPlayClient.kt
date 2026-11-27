@@ -674,6 +674,10 @@ class AirPlayClient(
     var controllerInputRevision: Long? = null
         private set
 
+    /** Start of the current acknowledged, uninterrupted BMW grant, for the first-picture timeout. */
+    @Volatile internal var firstPictureGrantSince: Long? = null
+        private set
+
     @Volatile var retryableScreenLoan: Long? = null
         private set
 
@@ -708,6 +712,8 @@ class AirPlayClient(
     }
 
     // Snapshot at the user's tap, without waiting on a potentially slow RTSP transaction on the UI thread.
+    val needsExplicitScreenReturn: Boolean get() = bmwBorrowGuard?.needsExplicitScreenReturn == true
+
     fun screenRevisionAtTap(): Long? = bmwBorrowGuard?.captureUiRestoreRevision()
 
     /** Never alters ownership. Retry an unacknowledged return, or redraw a confirmed grant. */
@@ -726,10 +732,10 @@ class AirPlayClient(
     }
 
     /** requestUI 执行时核对状态代次，再按当前借屏/原生归属决定是否恢复。 */
-    fun restoreRequestedUi(expectedRevision: Long, refreshLoan: Boolean = false): UiRestoreResult = synchronized(modeStateLock) {
+    fun restoreRequestedUi(expectedRevision: Long, refreshLoan: Boolean = false, explicitReturn: Boolean = refreshLoan): UiRestoreResult = synchronized(modeStateLock) {
         if (cancelled) return@synchronized UiRestoreResult(false, "client_cancelled")
         val guard = borrowGuardLocked()
-        val decision = guard.restoreRequestedUi(expectedRevision, refreshLoan)
+        val decision = guard.restoreRequestedUi(expectedRevision, refreshLoan, explicitReturn)
         if (decision.reason == "awaiting_screen_return") {
             // Tell the receiver exactly which resources are still on its side. A 200
             // here acknowledges the status message only; it is not a screen grant.
@@ -745,12 +751,12 @@ class AirPlayClient(
     }
 
     /** BMW 借屏及实测特定 Take 共用同一状态锁；Take 本身不能触发恢复关键帧。 */
-    fun respondToModeChange(command: Map<*, *>): ModeChangeResult = synchronized(modeStateLock) {
+    fun respondToModeChange(command: Map<*, *>, projectionShowing: Boolean = false): ModeChangeResult = synchronized(modeStateLock) {
         if (cancelled) return@synchronized ModeChangeResult(false, null)
         val guard = borrowGuardLocked()
         val before = guard.isScreenAvailableToController()
         val mediaBefore = guard.mediaEpoch()
-        val result = guard.apply(command)
+        val result = guard.apply(command, projectionShowing && controllerInputRevision != null)
         retryableScreenLoan = guard.captureUiRestoreRevision().takeIf(guard::canRetryScreenLoan)
         if (mediaBefore != null && guard.mediaEpoch() == null) log("AUDIO: 宝马原车通话开始，暂缓发送实时媒体")
         receiverAudioClock.noteBorrow(guard.isAudioBorrowed())
@@ -762,6 +768,9 @@ class AirPlayClient(
     private fun sendCurrentModesLocked(reassertingOwnership: Boolean = false): Boolean {
         val guard = borrowGuardLocked()
         if (!reassertingOwnership || controllerInputRevision != guard.controllerInputRevision()) controllerInputRevision = null
+        if (controllerInputRevision == null || guard.screenRefreshBlock(guard.captureUiRestoreRevision()) != null) {
+            firstPictureGrantSince = null
+        }
         val resources = guard.resources()
         // Immutable numeric/boolean snapshot published before the existing potentially long request.
         peerDiagnostics.recordModes(readerGeneration, SystemClock.elapsedRealtime(), guard.summary(), resources)
@@ -792,9 +801,13 @@ class AirPlayClient(
                     if (wasHeld && guard.mediaEpoch() != null) log("AUDIO: 宝马确认通话结束且主音频已归还，恢复实时媒体")
                 }
                 controllerInputRevision = if (accepted && !cancelled) guard.controllerInputRevision() else null
+                firstPictureGrantSince = if (controllerInputRevision != null &&
+                    guard.screenRefreshBlock(guard.captureUiRestoreRevision()) == null
+                ) firstPictureGrantSince ?: SystemClock.elapsedRealtime() else null
             }
         } catch (error: IOException) {
             controllerInputRevision = null
+            firstPictureGrantSince = null
             log("AIRPLAY: modesChanged 失败 - ${error.message}")
             false
         }

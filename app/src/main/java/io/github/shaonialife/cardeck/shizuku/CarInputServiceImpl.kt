@@ -1,6 +1,7 @@
 package io.github.shaonialife.cardeck.shizuku
 
 import android.content.Context
+import android.hardware.display.DisplayManager
 import android.hardware.input.InputManager
 import android.os.IBinder
 import android.os.SystemClock
@@ -12,6 +13,10 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import java.lang.reflect.Method
+
+// AOSP VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL. The public SDK omits this flag.
+private const val DESTROY_CONTENT_ON_REMOVAL = 1 shl 8
+internal const val CAR_DISPLAY_CONTENT_FLAGS = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or DESTROY_CONTENT_ON_REMOVAL
 
 /**
  * Shizuku UserService 实现：运行在常驻 shell 进程（uid 2000），
@@ -31,6 +36,15 @@ class CarInputServiceImpl(
 ) : ICarInput.Stub() {
     override fun projectedUidRoute(uid: Int, carHandle: Long): String =
         ProjectedUidRouteReader.read(context, uid, carHandle).name
+
+    override fun dismissBaiduReturnOverlay(displayId: Int, guard: IBaiduReturnGuard): String {
+        fun ownsMap(): Boolean = synchronized(virtualDisplays) {
+            val display = virtualDisplays[displayId]?.display
+            displayId > 0 && display?.isValid == true && display.name == "CarPlayMap"
+        }
+        if (!ownsMap()) return "wrong-display"
+        return BaiduReturnOverlay.dismiss(displayId) { ownsMap() && guard.canDismiss() }
+    }
 
     private val systemAudioCapture = ShellAudioCaptureController(context)
 
@@ -168,7 +182,7 @@ class CarInputServiceImpl(
         displayId: Int,
     ): Boolean {
         val inj = injector
-        if (inj == null) {
+        if (inj == null || displayId > 0 && setDisplayIdMethod == null) {
             event.recycle()
             return false
         }
@@ -296,10 +310,20 @@ class CarInputServiceImpl(
         y: Int,
     ): Boolean {
         if (dragDisplay != displayId) return false
-        dragDisplay = -1
         val now = SystemClock.uptimeMillis()
-        val up = build(dragDownTime, now, MotionEvent.ACTION_UP, x.toFloat(), y.toFloat()) ?: return false
-        return inject(up, displayId)
+        val up = build(dragDownTime, now, MotionEvent.ACTION_UP, x.toFloat(), y.toFloat())
+        if (up == null || !inject(up, displayId)) {
+            pointerCancel(displayId)
+            return false
+        }
+        dragDisplay = -1
+        return true
+    }
+
+    override fun pointerCancel(displayId: Int): Boolean {
+        if (dragDisplay != displayId) return false
+        val event = build(dragDownTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_CANCEL, 0f, 0f) ?: return false
+        return inject(event, displayId).also { if (it) dragDisplay = -1 }
     }
 
     // ---- 受信虚拟屏 ----
@@ -442,12 +466,11 @@ class CarInputServiceImpl(
             // 公开化只放宽窗口访问；ROM 的「公开屏默认自动镜像」仅在未声明
             // OWN_CONTENT_ONLY 时生效，我们已声明，不受影响。dock 屏不受信、无输入场景，
             // 维持私有（也避免无关窗口挂上去）。
-            val flags =
-                (if (trusted) FLAG_TRUSTED or android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC else 0) or
-                    controllerFlags or
-                    FLAG_SUPPORTS_TOUCH or
-                    android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+            val publicTrusted = if (trusted) FLAG_TRUSTED or android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC else 0
+            val flags = publicTrusted or controllerFlags or FLAG_SUPPORTS_TOUCH or CAR_DISPLAY_CONTENT_FLAGS
             fileLog("flags=0x${flags.toString(16)}")
+            // The shell-owned display uses platform focus, touch, and removal flags omitted from the SDK IntDef.
+            @Suppress("WrongConstant")
             val vd = dm.createVirtualDisplay(name, width, height, dpi, surface, flags, null, null)
             val id = vd?.display?.displayId ?: -1
             fileLog("createVirtualDisplay -> vd=$vd id=$id")

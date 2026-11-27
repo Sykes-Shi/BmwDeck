@@ -25,7 +25,7 @@ object SettingsMenus {
             Item(SUPERSAMPLE, "应用超采样", "竖屏应用渲染更精细，可三态调节", R.drawable.ic_menu_zoom),
             Item(ORIENTATION, "应用横屏", "竖屏应用在车机横屏全屏显示", R.drawable.ic_screen_rotation),
             Item(DOCK, "dock 栏设置", "壁纸暗幕透明度与模糊程度", R.drawable.ic_menu_dock),
-            Item(DEFAULT_MAP, "默认地图", "仪表盘地图屏使用的地图应用", R.drawable.ic_menu_map),
+            Item(DEFAULT_MAP, "中控地图", "百度地图汽车版与地图显示大小", R.drawable.ic_menu_map),
             Item(DISPLAY, "显示", "流分辨率缩放与目标帧率", R.drawable.ic_menu_display),
         )
 

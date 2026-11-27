@@ -27,12 +27,15 @@ internal class BmwModeBorrowGuard(receiverIdentity: String) {
     @Volatile private var uiRevision = 0L
     private var screenReturnPending = false
     private var screenNativeReturnArmed = false
+    private var consecutiveKnownLoans = 0
+    @Volatile var needsExplicitScreenReturn = false
+        private set
     private var deferredMedia: String? = null
 
     data class UiRestoreDecision(val allowed: Boolean, val reason: String)
 
     /** 仅返回固定词和有界计数；borrowID、URL、reasonStr 及其他任意文本从不输出。 */
-    fun apply(command: Map<*, *>): String {
+    fun apply(command: Map<*, *>, projectionShowing: Boolean = false): String {
         fun ignored(reason: String) = "modeBorrowGuard=$reason ${summary()}"
         if (!eligibleReceiver) return ignored("receiver_not_supported")
         if (command["type"] != "changeModes") return ignored("unsupported_command")
@@ -53,6 +56,7 @@ internal class BmwModeBorrowGuard(receiverIdentity: String) {
         // 超出处理上限时可能遗漏另一条借用，不能因截断而声称资源已空闲。
         if (rows.size > MAX_RESOURCE_ROWS) {
             uiRevision++
+            consecutiveKnownLoans = 0
             screen.unknown = true
             audio.unknown = true
             deferredMedia = null
@@ -79,6 +83,24 @@ internal class BmwModeBorrowGuard(receiverIdentity: String) {
             screen.unknown = true
             screenNativeReturnArmed = false
             held++
+        }
+        // MGU-50-P, Nov 22: two separate, identified 500/1000 loans followed by one
+        // 500/500/100 screen Take. Mixed batches and different constraints stay loans.
+        val sole = screenRows.singleOrNull()?.takeIf { rows.size == 1 }
+        val matchedPair = consecutiveKnownLoans == 2 && screen.ids.size == 2 && !screen.unknown &&
+            screen.permanentOwner == CONTROLLER && isObservedScreenTake(sole) && integer(sole?.get("transferType")) == 1L
+        // On Nov 23 the MGU took an already streaming screen directly. Its same startup
+        // declaration can precede the first picture; keep initial negotiation unchanged.
+        val standaloneTake = projectionShowing && !screen.borrowed && screen.permanentOwner == CONTROLLER &&
+            isObservedScreenTake(sole) && integer(sole?.get("transferType")) == 1L
+        if (screenRows.isNotEmpty()) {
+            val id = token(sole?.get("borrowID"))
+            consecutiveKnownLoans = if (sole != null && !screen.unknown && screen.permanentOwner == CONTROLLER &&
+                screen.ids.size == consecutiveKnownLoans && consecutiveKnownLoans < 2 &&
+                integer(sole["transferType"]) == 3L && integer(sole["transferPriority"]) == 500L &&
+                integer(sole["unborrowConstraint"]) == 1000L && id?.length == 1 && id !in screen.ids &&
+                !sole.containsKey("takeConstraint") && !sole.containsKey("borrowConstraint")
+            ) consecutiveKnownLoans + 1 else 0
         }
         val singleKnownScreenBorrow = screen.ids.size == 1 && !screen.unknown
         if (screenRows.isNotEmpty()) uiRevision++
@@ -119,12 +141,13 @@ internal class BmwModeBorrowGuard(receiverIdentity: String) {
                     // 不清理 unknown：无法证明损坏/溢出时漏记的借用也已归还。
                 }
                 1L -> {
-                    if (state === screen && singleKnownScreenBorrow && !hasScreenBorrow && isObservedScreenTake(resource) &&
-                        !screen.unknown && screen.ids.size == 1
+                    if (state === screen && (singleKnownScreenBorrow || matchedPair || standaloneTake) && !hasScreenBorrow &&
+                        !screen.unknown && isObservedScreenTake(resource)
                     ) {
                         // 2026-11-06 实车：倒车 Borrow 后以 500/500/100 Take 切回原生界面，
                         // 并未另发 Unborrow。此时只结束临时借用；必须等后续 requestUI 才交还手机。
                         screen.ids.clear()
+                        needsExplicitScreenReturn = needsExplicitScreenReturn || matchedPair || standaloneTake
                         screen.permanentOwner = ACCESSORY
                         screenNativeReturnArmed = true
                         screenTake++
@@ -219,17 +242,19 @@ internal class BmwModeBorrowGuard(receiverIdentity: String) {
     fun controllerInputRevision(): Long? = if (eligibleReceiver && isScreenAvailableToController()) uiRevision else null
 
     /** 仅在车机 requestUI 到达后调用；排队期间有新主屏事件时不得使用旧请求恢复。 */
-    fun restoreRequestedUi(expectedRevision: Long, refreshLoan: Boolean = false): UiRestoreDecision {
+    fun restoreRequestedUi(expectedRevision: Long, refreshLoan: Boolean = false, explicitReturn: Boolean = refreshLoan): UiRestoreDecision {
         if (expectedRevision != uiRevision) return UiRestoreDecision(false, "mode_state_changed")
         if (screen.borrowed) {
             return UiRestoreDecision(false, if (refreshLoan && canRetryScreenLoan(expectedRevision)) "awaiting_screen_return" else "receiver_screen_borrowed")
         }
         if (screen.permanentOwner == ACCESSORY) {
-            if (nativePhoneCall || nativeSpeech > 0L) return UiRestoreDecision(false, "native_activity_active")
+            if (nativePhoneCall || nativeSpeech > 0L || (needsExplicitScreenReturn && audio.borrowed)) return UiRestoreDecision(false, "native_activity_active")
             if (!screenNativeReturnArmed) return UiRestoreDecision(false, "native_screen_restore_not_supported")
+            if (needsExplicitScreenReturn && !explicitReturn) return UiRestoreDecision(false, "awaiting_explicit_screen_return")
             // 只有上述本车已观测参数的 Take 能进入此状态，takeConstraint=500 允许用户请求回切。
             screen.permanentOwner = CONTROLLER
             screenNativeReturnArmed = false
+            needsExplicitScreenReturn = false
             uiRevision++
             return UiRestoreDecision(true, "bmw_take_then_request_ui")
         }
@@ -238,7 +263,7 @@ internal class BmwModeBorrowGuard(receiverIdentity: String) {
 
     fun summary(): String =
         "screenOwner=${screen.owner} screenActive=${screen.ids.size} screenUnknown=${screen.unknown} " +
-            "screenPermanent=${screen.permanentOwner} nativeReturnArmed=$screenNativeReturnArmed uiRevision=$uiRevision " +
+            "screenPermanent=${screen.permanentOwner} nativeReturnArmed=$screenNativeReturnArmed uiRevision=$uiRevision explicitReturnOnly=$needsExplicitScreenReturn " +
             "audioOwner=${audio.owner} audioActive=${audio.ids.size} audioUnknown=${audio.unknown}"
 
     private fun isObservedScreenTake(resource: Map<*, *>?): Boolean =

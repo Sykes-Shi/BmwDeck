@@ -22,7 +22,8 @@ object DebugFileLog {
      * 历史轮次的日志会把真正有用的部分淹没——导出默认只取最后一条标记之后的内容。
      * 标记本身写进文件而不是只记内存偏移：文件可能被 2MB 截断，偏移会失效。
      */
-    const val SESSION_MARKER = "===== CarDeck 进程启动（本次日志起点）====="
+    const val SESSION_MARKER = "===== BmwDeck 进程启动（本次日志起点）====="
+    private const val LEGACY_SESSION_MARKER = "===== CarDeck 进程启动（本次日志起点）====="
 
     /**
      * 写入本次启动标记。由 [io.github.shaonialife.cardeck.SenderApp.onCreate] 调用一次；
@@ -50,8 +51,8 @@ object DebugFileLog {
      * 无标记 → 全文：旧版本写入的文件里没有标记，此时全量比空更好。
      */
     internal fun currentSessionSlice(text: String): String {
-        val markerAt = text.lastIndexOf(SESSION_MARKER)
-        return if (markerAt < 0) text else text.substring(markerAt + SESSION_MARKER.length)
+        val (offset, marker) = text.findLastAnyOf(listOf(SESSION_MARKER, LEGACY_SESSION_MARKER)) ?: return text
+        return text.substring(offset + marker.length)
     }
 
     fun append(

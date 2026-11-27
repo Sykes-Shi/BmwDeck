@@ -1,20 +1,29 @@
 package io.github.shaonialife.cardeck.launcher
 
+import io.github.shaonialife.cardeck.media.NetEaseCarEdition
+
 enum class CarShortcut { MEDIA, MAP, OPTION, NAV }
+
+internal enum class CommutePlace(val label: String, private val address: String) {
+    HOME("回家", "home"),
+    WORK("去公司", "company");
+
+    val uri: String get() = "baidumap://map/navi/common?addr=$address&coord_type=bd09ll&src=andr.bmwdeck.cardeck"
+}
 
 /** One accepted edge owns its launch. A different action, session or subsequent press supersedes it. */
 internal class CarShortcutGate {
-    class Ticket(val action: CarShortcut, val session: Long, val whenMs: Long)
+    class Ticket(val action: CarShortcut, val session: Long, val whenMs: Long, val place: CommutePlace?)
     private var latest: Ticket? = null
     private var pending = false
 
     @Synchronized
-    fun claim(action: CarShortcut, session: Long, nowMs: Long): Ticket? {
+    fun claim(action: CarShortcut, session: Long, nowMs: Long, place: CommutePlace? = null): Ticket? {
         val old = latest
-        if (old != null && old.session == session && old.action == action &&
+        if (old != null && old.session == session && old.action == action && old.place == place &&
             (pending || nowMs - old.whenMs in 0 until 550L)
         ) return null
-        return Ticket(action, session, nowMs).also { latest = it; pending = true }
+        return Ticket(action, session, nowMs, place).also { latest = it; pending = true }
     }
 
     @Synchronized fun owns(ticket: Ticket): Boolean = latest === ticket
@@ -31,7 +40,7 @@ internal class CarShortcutGate {
 
 /** The dedicated music key should not select a video or short-video session. */
 internal object ShortcutMusic {
-    val known = listOf("com.netease.cloudmusic", "com.spotify.music", "com.tencent.qqmusic",
+    val known = listOf(NetEaseCarEdition.CAR, NetEaseCarEdition.MOBILE, "com.spotify.music", "com.tencent.qqmusic",
         "com.kugou.android", "cn.kuwo.player", "com.apple.android.music",
         "com.google.android.apps.youtube.music", "com.sec.android.app.music")
 

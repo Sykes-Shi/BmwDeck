@@ -17,8 +17,8 @@ android {
         applicationId = "io.github.shaonialife.cardeck.bmwprobe"
         minSdk = 31
         targetSdk = 34
-        versionCode = 165
-        versionName = "$appVersionName-v47-public"
+        versionCode = 178
+        versionName = "$appVersionName-v58-center"
     }
 
     signingConfigs {
@@ -66,13 +66,6 @@ android {
         //  ./gradlew :app:updateLintBaseline —— 修复问题后重建基线（有意豁免时）
         abortOnError = true
         baseline = file("lint-baseline.xml")
-    }
-}
-
-// Developer variant stays separate; public release versionCode is defined above.
-androidComponents {
-    onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(164) }
     }
 }
 

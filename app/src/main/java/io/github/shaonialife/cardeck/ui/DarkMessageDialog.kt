@@ -41,6 +41,7 @@ object DarkMessageDialog {
         val label: String,
         val emphasis: Emphasis = Emphasis.TEXT,
         val dismissOnClick: Boolean = true,
+        @androidx.annotation.ColorRes val textColor: Int? = null,
         val onClick: () -> Unit,
     )
 
@@ -162,6 +163,7 @@ object DarkMessageDialog {
                     )
                 }
             }
+            action.textColor?.let { setTextColor(activity.getColor(it)) }
             layoutParams =
                 if (vertical) {
                     LinearLayout

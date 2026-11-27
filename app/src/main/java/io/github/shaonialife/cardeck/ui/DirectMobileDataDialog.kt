@@ -37,7 +37,7 @@ internal class DirectMobileDataDialog(private val activity: AppCompatActivity) {
         val actions = arrayListOf<Pair<String, () -> Unit>>()
         if (apps.isNotEmpty()) actions.add("从 Clash 导出的名单选择" to { importMode(apps) })
         actions.add("打开三星流量监控" to ::openSystemSettings)
-        if (MobileDataRouting.hasChanges(context)) actions.add("撤销 CarDeck 的移动数据设置" to ::restore)
+        if (MobileDataRouting.hasChanges(context)) actions.add("撤销 BmwDeck 的移动数据设置" to ::restore)
         AlertDialog.Builder(activity)
             .setTitle(title)
             .setItems(actions.map { it.first }.toTypedArray()) { _, index -> actions[index].second.invoke() }
@@ -118,7 +118,7 @@ internal class DirectMobileDataDialog(private val activity: AppCompatActivity) {
     }
 
     private fun restore() {
-        work("正在撤销 CarDeck 的设置…", { MobileDataRouting.restore(context) }) {
+        work("正在撤销 BmwDeck 的设置…", { MobileDataRouting.restore(context) }) {
             showMessage("撤销结果", it)
         }
     }

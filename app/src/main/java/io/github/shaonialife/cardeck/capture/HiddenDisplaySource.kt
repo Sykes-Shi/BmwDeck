@@ -11,8 +11,7 @@ import io.github.shaonialife.cardeck.shizuku.ShizukuGate
  * 经 Shizuku(shell) `am start --display` 把应用启动进去。真实锁屏会影响这些屏上的
  * 第三方画面与输入；省电暗幕仅降低手机显示负担，手机仍保持解锁，不解除 keyguard。
  *
- * 启动目标优先「高德地图车机版」（天生横屏；其引导页会丢 --display，需显式启动
- * MainMapActivity 并强制 fullscreen），未安装回退手机版高德。
+ * 中控导航使用独立地图屏上的百度地图汽车版。
  * （移植自参考项目 android-auto 的 VirtualDisplaySource）
  */
 class HiddenDisplaySource(
